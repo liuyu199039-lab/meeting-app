@@ -86,6 +86,9 @@ function useSpeechRecognition({ lang, onResult, onEnd }) {
   const [listening, setListening] = useState(false);
   const [supported, setSupported] = useState(true);
   const accumulatedRef = useRef("");
+  // latest interim (not-yet-finalized) text. On mobile a session can end while
+  // text is still interim; we flush it into the accumulator so it isn't lost.
+  const interimRef = useRef("");
   // intent flag: true while the user wants to keep recording. On mobile the
   // engine auto-stops after a short silence, so we auto-restart while this is set.
   const wantRef = useRef(false);
@@ -110,9 +113,19 @@ function useSpeechRecognition({ lang, onResult, onEnd }) {
         else interim += t;
       }
       if (finalChunk) accumulatedRef.current += finalChunk;
+      interimRef.current = interim;
       onResultRef.current({ interim, accumulated: accumulatedRef.current });
     };
+    // commit any still-interim text so session boundaries don't drop words
+    const flushInterim = () => {
+      if (interimRef.current.trim()) {
+        accumulatedRef.current += (accumulatedRef.current ? " " : "") + interimRef.current.trim();
+        interimRef.current = "";
+        onResultRef.current({ interim: "", accumulated: accumulatedRef.current });
+      }
+    };
     rec.onend = () => {
+      flushInterim();
       // Mobile browsers end the session on silence. If the user still wants to
       // record, restart instead of finishing — this keeps it "continuous".
       if (wantRef.current) {
@@ -134,6 +147,7 @@ function useSpeechRecognition({ lang, onResult, onEnd }) {
 
   const start = useCallback(() => {
     accumulatedRef.current = "";
+    interimRef.current = "";
     wantRef.current = true;
     try { recRef.current?.start(); } catch {}
     setListening(true);
