@@ -114,14 +114,15 @@ function useSpeechRecognition({ lang, onResult, onEnd }) {
       }
       if (finalChunk) accumulatedRef.current += finalChunk;
       interimRef.current = interim;
-      onResultRef.current({ interim, accumulated: accumulatedRef.current });
+      onResultRef.current({ interim, accumulated: accumulatedRef.current, finalChunk });
     };
     // commit any still-interim text so session boundaries don't drop words
     const flushInterim = () => {
       if (interimRef.current.trim()) {
-        accumulatedRef.current += (accumulatedRef.current ? " " : "") + interimRef.current.trim();
+        const flushed = interimRef.current.trim();
+        accumulatedRef.current += (accumulatedRef.current ? " " : "") + flushed;
         interimRef.current = "";
-        onResultRef.current({ interim: "", accumulated: accumulatedRef.current });
+        onResultRef.current({ interim: "", accumulated: accumulatedRef.current, finalChunk: flushed });
       }
     };
     rec.onend = () => {
@@ -293,61 +294,142 @@ function TabSwitch({ tab, setTab, glow }) {
 function TranslatePage({ feature, onBack }) {
   const isZh = feature.id === "jp-zh";
   const targetLabel = isZh ? "Chinese" : "English";
+  const sys = isZh
+    ? "你是专业日中同声传译员。将日文准确翻译成简体中文，保持自然流畅，专业术语准确。只输出翻译结果。"
+    : "You are a professional Japanese-English interpreter. Translate Japanese to natural, accurate English. Output only the translation.";
+
   const [interim, setInterim] = useState("");
   const [accumulated, setAccumulated] = useState("");
-  const [translation, setTranslation] = useState("");
+  const [segments, setSegments] = useState([]); // live feed: {src, tr, time, pending}
+  const [translation, setTranslation] = useState(""); // manual-mode single result
   const [translating, setTranslating] = useState(false);
-  const [history, setHistory] = useState([]);
   const [manualInput, setManualInput] = useState("");
   const [tab, setTab] = useState("mic");
   const [error, setError] = useState("");
 
+  // ── live rolling translation buffer ──
+  const pendingRef = useRef("");   // recognized JP text waiting to be translated
+  const timerRef = useRef(null);
+  const DEBOUNCE = 1400;           // translate a chunk after this pause (ms)
+
+  const translateChunk = useCallback(async (text) => {
+    const src = text.trim();
+    if (!src) return;
+    const id = Date.now() + Math.random();
+    setSegments(s => [...s, { id, src, tr: "", time: new Date().toLocaleTimeString(), pending: true }]);
+    try {
+      const result = await callClaude(src, sys);
+      setSegments(s => s.map(seg => seg.id === id ? { ...seg, tr: result, pending: false } : seg));
+    } catch (e) {
+      setSegments(s => s.map(seg => seg.id === id ? { ...seg, tr: "⚠️ " + e.message, pending: false } : seg));
+    }
+  }, [sys]);
+
+  const flushPending = useCallback(() => {
+    const text = pendingRef.current;
+    pendingRef.current = "";
+    if (text.trim()) translateChunk(text);
+  }, [translateChunk]);
+
   const { listening, supported, start, stop } = useSpeechRecognition({
     lang: "ja-JP",
-    onResult: ({ interim, accumulated }) => { setInterim(interim); setAccumulated(accumulated); },
-    onEnd: async (text) => { if (text.trim()) await translate(text); },
+    onResult: ({ interim, accumulated, finalChunk }) => {
+      setInterim(interim);
+      setAccumulated(accumulated);
+      if (finalChunk && finalChunk.trim()) {
+        // buffer the new chunk, then translate it after a short pause
+        pendingRef.current += finalChunk;
+        if (timerRef.current) clearTimeout(timerRef.current);
+        timerRef.current = setTimeout(flushPending, DEBOUNCE);
+      }
+    },
+    onEnd: () => {
+      // translate whatever is left when recording stops
+      if (timerRef.current) clearTimeout(timerRef.current);
+      flushPending();
+    },
   });
 
-  const translate = async (text) => {
+  // cleanup timer on unmount
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
+
+  const startLive = () => { setSegments([]); setInterim(""); setAccumulated(""); pendingRef.current = ""; setError(""); start(); };
+
+  const translateManual = async (text) => {
     setError(""); setTranslating(true);
     try {
-      const sys = isZh
-        ? "你是专业日中同声传译员。将日文准确翻译成简体中文，保持自然流畅，专业术语准确。只输出翻译结果。"
-        : "You are a professional Japanese-English interpreter. Translate Japanese to natural, accurate English. Output only the translation.";
       const result = await callClaude(text, sys);
       setTranslation(result);
-      setHistory(h => [{ src: text, tr: result, time: new Date().toLocaleTimeString() }, ...h.slice(0, 9)]);
     } catch (e) { setError("Translation failed: " + e.message); }
     setTranslating(false);
+  };
+
+  const fullText = segments.filter(s => s.tr && !s.pending).map(s => s.tr).join("\n");
+  const download = () => {
+    const blob = new Blob([fullText], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = `translation_${new Date().toLocaleDateString("en-CA")}.txt`; a.click();
   };
 
   return (
     <PageShell feature={feature} onBack={onBack}>
       <TabSwitch tab={tab} setTab={setTab} glow={feature.glow} />
-      {tab === "mic"
-        ? <MicSection listening={listening} supported={supported} start={start} stop={stop} glow={feature.glow} accumulated={accumulated} interim={interim} label="Tap the mic and start speaking Japanese" />
-        : <TextInput value={manualInput} onChange={setManualInput} label="Enter Japanese text" accent={feature.glow} placeholder="Type Japanese here, e.g. 本日の会議を始めましょう。" rows={5} />
-      }
-      {tab === "manual" && (
-        <ActionBtn onClick={() => translate(manualInput)} loading={translating} disabled={!manualInput.trim()} gradient={feature.gradient}>
-          ▶ Translate to {targetLabel}
-        </ActionBtn>
-      )}
-      {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
-      {translating && <div style={{ textAlign: "center", padding: 20, color: feature.glow, fontSize: 13 }}>⏳ Translating...</div>}
-      {translation && !translating && <ResultBox content={translation} label={`Translation → ${targetLabel}`} accent={feature.glow} />}
-      {history.length > 0 && (
-        <div style={{ marginTop: 28 }}>
-          <div style={{ fontSize: 12, color: "#64748b", marginBottom: 10 }}>History</div>
-          {history.map((h, i) => (
-            <div key={i} onClick={() => setTranslation(h.tr)} style={{ ...glass({ borderRadius: 12 }), padding: 12, marginBottom: 8, cursor: "pointer" }}>
-              <div style={{ fontSize: 11, color: "#475569", marginBottom: 4 }}>{h.time}</div>
-              <div style={{ fontSize: 12, color: "#94a3b8" }}>JP: {h.src.slice(0, 50)}{h.src.length > 50 ? "…" : ""}</div>
-              <div style={{ fontSize: 12, color: "#cbd5e1", marginTop: 3 }}>→ {h.tr.slice(0, 60)}{h.tr.length > 60 ? "…" : ""}</div>
+      {tab === "mic" ? (
+        <>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 16, padding: "24px 0" }}>
+            <MicButton listening={listening} onStart={startLive} onStop={stop} glow={feature.glow} disabled={!supported} />
+            <Waveform active={listening} glow={feature.glow} />
+            <div style={{ fontSize: 13, color: listening ? feature.glow : "#64748b", fontWeight: 600, textAlign: "center" }}>
+              {!supported ? "⚠️ Please use Chrome browser"
+                : listening ? "🔴 Live translating... keep talking, tap to stop"
+                : "Tap once — it translates as you speak, no need to hold"}
             </div>
-          ))}
-        </div>
+          </div>
+
+          {/* live recognized text (current line being heard) */}
+          {(interim || (listening && !segments.length)) && (
+            <div style={{ ...glass({ borderRadius: 14 }), padding: 12, marginBottom: 14 }}>
+              <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>Listening</div>
+              <div style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.6 }}>{interim || "…"}</div>
+            </div>
+          )}
+
+          {/* live translation feed */}
+          {segments.length > 0 && (
+            <div style={{ ...glass({ borderColor: `${feature.glow}44` }), overflow: "hidden", boxShadow: `0 0 30px ${feature.glow}22` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: `${feature.glow}18`, borderBottom: `1px solid ${feature.glow}22` }}>
+                <span style={{ fontSize: 12, color: feature.glow, fontWeight: 700 }}>Live translation → {targetLabel}</span>
+                {fullText && (
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={download} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer" }}>↓ Download</button>
+                    <button onClick={() => navigator.clipboard.writeText(fullText)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer" }}>Copy all</button>
+                  </div>
+                )}
+              </div>
+              <div style={{ maxHeight: 360, overflowY: "auto", padding: "4px 0" }}>
+                {segments.map(seg => (
+                  <div key={seg.id} style={{ padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                    <div style={{ fontSize: 11, color: "#475569", marginBottom: 3 }}>JP: {seg.src}</div>
+                    <div style={{ fontSize: 15, color: seg.pending ? "#64748b" : "#e2e8f0", lineHeight: 1.6 }}>
+                      {seg.pending ? "⏳ translating…" : seg.tr}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          <TextInput value={manualInput} onChange={setManualInput} label="Enter Japanese text" accent={feature.glow} placeholder="Type Japanese here, e.g. 本日の会議を始めましょう。" rows={5} />
+          <ActionBtn onClick={() => translateManual(manualInput)} loading={translating} disabled={!manualInput.trim()} gradient={feature.gradient}>
+            ▶ Translate to {targetLabel}
+          </ActionBtn>
+          {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
+          {translation && !translating && <ResultBox content={translation} label={`Translation → ${targetLabel}`} accent={feature.glow} />}
+        </>
       )}
+      {tab === "mic" && error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
     </PageShell>
   );
 }
