@@ -171,9 +171,11 @@ function useSpeechRecognition({ lang, onResult, onEnd }) {
 }
 
 // ── useRollingTranslate ──────────────────────────────────────
-// Buffers recognized chunks and auto-translates them after a short pause,
-// producing a live feed of {id, src, tr, pending} segments.
-function useRollingTranslate(sys, debounce = 1400) {
+// Buffers recognized chunks and auto-translates them a paragraph at a time:
+// it waits until either ~maxChars of text has piled up, or a longer pause
+// (debounce) signals the end of a paragraph. Produces a live feed of
+// {id, src, tr, pending} segments.
+function useRollingTranslate(sys, { debounce = 3500, maxChars = 140 } = {}) {
   const [segments, setSegments] = useState([]);
   const pendingRef = useRef("");
   const timerRef = useRef(null);
@@ -204,8 +206,11 @@ function useRollingTranslate(sys, debounce = 1400) {
     if (!chunk || !chunk.trim()) return;
     pendingRef.current += chunk;
     if (timerRef.current) clearTimeout(timerRef.current);
+    // translate right away once we've gathered a paragraph's worth of text...
+    if (pendingRef.current.length >= maxChars) { flush(); return; }
+    // ...otherwise wait for a longer pause (end of a paragraph).
     timerRef.current = setTimeout(flush, debounce);
-  }, [flush, debounce]);
+  }, [flush, debounce, maxChars]);
 
   const reset = useCallback(() => {
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
