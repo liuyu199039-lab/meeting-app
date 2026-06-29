@@ -206,8 +206,10 @@ function useRollingTranslate(sys, { debounce = 3500, maxChars = 140 } = {}) {
     if (!chunk || !chunk.trim()) return;
     pendingRef.current += chunk;
     if (timerRef.current) clearTimeout(timerRef.current);
-    // translate right away once we've gathered a paragraph's worth of text...
-    if (pendingRef.current.length >= maxChars) { flush(); return; }
+    // translate once we've gathered a paragraph's worth of text — but defer it
+    // so this speech-recognition callback returns immediately and the engine
+    // keeps transcribing while the translation request runs in the background.
+    if (pendingRef.current.length >= maxChars) { timerRef.current = setTimeout(flush, 0); return; }
     // ...otherwise wait for a longer pause (end of a paragraph).
     timerRef.current = setTimeout(flush, debounce);
   }, [flush, debounce, maxChars]);
@@ -225,18 +227,18 @@ function useRollingTranslate(sys, { debounce = 3500, maxChars = 140 } = {}) {
 }
 
 // reusable live-translation feed UI
-function LiveFeed({ segments, fullText, glow, label, onDownload }) {
+function LiveFeed({ segments, fullText, glow, label, onDownload, onClear }) {
+  const btn = { background: "none", border: `1px solid ${glow}44`, color: glow, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer" };
   if (!segments.length) return null;
   return (
     <div style={{ ...glass({ borderColor: `${glow}44` }), marginTop: 16, overflow: "hidden", boxShadow: `0 0 30px ${glow}22` }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: `${glow}18`, borderBottom: `1px solid ${glow}22` }}>
         <span style={{ fontSize: 12, color: glow, fontWeight: 700 }}>{label}</span>
-        {fullText && (
-          <div style={{ display: "flex", gap: 8 }}>
-            {onDownload && <button onClick={() => onDownload(fullText)} style={{ background: "none", border: `1px solid ${glow}44`, color: glow, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer" }}>↓ Download</button>}
-            <button onClick={() => navigator.clipboard.writeText(fullText)} style={{ background: "none", border: `1px solid ${glow}44`, color: glow, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer" }}>Copy all</button>
-          </div>
-        )}
+        <div style={{ display: "flex", gap: 8 }}>
+          {fullText && onDownload && <button onClick={() => onDownload(fullText)} style={btn}>↓ Download</button>}
+          {fullText && <button onClick={() => navigator.clipboard.writeText(fullText)} style={btn}>Copy all</button>}
+          {onClear && <button onClick={onClear} style={{ ...btn, color: "#fb7185", borderColor: "#fb718544" }}>Clear</button>}
+        </div>
       </div>
       <div style={{ maxHeight: 360, overflowY: "auto", padding: "4px 0" }}>
         {segments.map(seg => (
@@ -248,6 +250,39 @@ function LiveFeed({ segments, fullText, glow, label, onDownload }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// reusable "summarize into study notes" block — takes the accumulated text and
+// asks the AI for structured Chinese study notes.
+function SummarizeNotes({ text, glow, gradient }) {
+  const [notes, setNotes] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  if (!text || !text.trim()) return null;
+
+  const summarize = async () => {
+    setError(""); setLoading(true);
+    try {
+      const sys = `你是专业学习笔记助手。根据下面这次学习/会议的完整内容，生成结构化的中文学习笔记：\n【主题概要】1-2句话\n【核心要点】分条列出关键知识点（难点用★标注）\n【重要细节】值得记住的细节、例子、数据\n【总结】3-5句话总结\n内容精炼、条理清晰。`;
+      const result = await callClaude(text, sys);
+      setNotes(result);
+    } catch (e) { setError("Failed: " + e.message); }
+    setLoading(false);
+  };
+
+  const download = () => {
+    const blob = new Blob([notes], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = `notes_${new Date().toLocaleDateString("en-CA")}.txt`; a.click();
+  };
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      <ActionBtn onClick={summarize} loading={loading} disabled={false} gradient={gradient}>📝 Summarize into notes</ActionBtn>
+      {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
+      {notes && <ResultBox content={notes} label="📝 Study Notes" accent={glow} onDownload={download} />}
     </div>
   );
 }
@@ -404,7 +439,8 @@ function TranslatePage({ feature, onBack }) {
     onEnd: () => flush(),
   });
 
-  const startLive = () => { reset(); setInterim(""); setError(""); start(); };
+  // keep prior transcripts across mic sessions — only clear interim/error
+  const startLive = () => { setInterim(""); setError(""); start(); };
 
   const translateManual = async (text) => {
     setError(""); setTranslating(true);
@@ -444,7 +480,8 @@ function TranslatePage({ feature, onBack }) {
             </div>
           )}
 
-          <LiveFeed segments={segments} fullText={fullText} glow={feature.glow} label={`Live translation → ${targetLabel}`} onDownload={download} />
+          <LiveFeed segments={segments} fullText={fullText} glow={feature.glow} label={`Live translation → ${targetLabel}`} onDownload={download} onClear={!listening ? reset : undefined} />
+          {!listening && <SummarizeNotes text={fullText} glow={feature.glow} gradient={feature.gradient} />}
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
         </>
       ) : (
@@ -525,7 +562,8 @@ function VideoTranslatePage({ feature, onBack }) {
     onResult: ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); },
     onEnd: () => flush(),
   });
-  const startLive = () => { reset(); setInterim(""); setError(""); start(); };
+  // keep prior transcripts across mic sessions — only clear interim/error
+  const startLive = () => { setInterim(""); setError(""); start(); };
 
   // transcript mode → translate the whole pasted text at once
   const translate = async (text) => {
@@ -593,7 +631,8 @@ function VideoTranslatePage({ feature, onBack }) {
           <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>
             💡 For videos without a transcript. Best on desktop Chrome; play the audio out loud near the mic.
           </div>
-          <LiveFeed segments={segments} fullText={fullText} glow={feature.glow} label="🌏 Live translation → Chinese" onDownload={download} />
+          <LiveFeed segments={segments} fullText={fullText} glow={feature.glow} label="🌏 Live translation → Chinese" onDownload={download} onClear={!listening ? reset : undefined} />
+          {!listening && <SummarizeNotes text={fullText} glow={feature.glow} gradient={feature.gradient} />}
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
         </>
       )}
