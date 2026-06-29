@@ -486,9 +486,9 @@ function VideoTranslatePage({ feature, onBack }) {
   const [interim, setInterim] = useState("");
   const [output, setOutput] = useState("");
   const [processing, setProcessing] = useState(false);
-  const [tab, setTab] = useState("mic");
-  const [manualInput, setManualInput] = useState("");
-  const [mode, setMode] = useState("both");
+  const [tab, setTab] = useState("transcript"); // "transcript" (paste) | "mic"
+  const [transcript, setTranscript] = useState("");
+  const [mode, setMode] = useState("bilingual"); // "bilingual" | "zh"
   const [error, setError] = useState("");
 
   const { listening, supported, start, stop } = useSpeechRecognition({
@@ -497,37 +497,62 @@ function VideoTranslatePage({ feature, onBack }) {
     onEnd: () => {},
   });
 
-  const process = async (text) => {
+  const translate = async (text) => {
     if (!text.trim()) return;
     setError(""); setProcessing(true);
     try {
       const sysMap = {
-        both: `Process the English video content and output two parts:\n【Transcript】clean up the original text, fix grammar, add punctuation\n【Chinese Translation】accurate translation, keep technical terms in English with parentheses`,
-        transcript: "Clean up the English speech into a clear transcript, fix grammar and add punctuation. Output only the English transcript.",
-        translate: "Translate the English content into accurate Simplified Chinese. Output only the Chinese translation.",
+        bilingual: "你是专业字幕翻译。把英文内容翻译成简体中文，按句子分段，每段先列英文原文，下一行给出中文翻译，专业术语在中文后用括号保留英文。",
+        zh: "你是专业字幕翻译。把英文内容准确、自然地翻译成简体中文，保持段落结构，专业术语在中文后用括号保留英文。只输出中文翻译。",
       };
       const result = await callClaude(text, sysMap[mode]);
       setOutput(result);
-    } catch (e) { setError("Processing failed: " + e.message); }
+    } catch (e) { setError("Translation failed: " + e.message); }
     setProcessing(false);
   };
 
-  const src = tab === "mic" ? accumulated : manualInput;
+  const download = () => {
+    const blob = new Blob([output], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = `video_translation_${new Date().toLocaleDateString("en-CA")}.txt`; a.click();
+  };
+
+  const src = tab === "mic" ? accumulated : transcript;
   return (
     <PageShell feature={feature} onBack={onBack}>
-      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        {[{ v: "both", l: "Transcript + Translation" }, { v: "transcript", l: "Transcript only" }, { v: "translate", l: "Translation only" }].map(m => (
+      {/* source: paste transcript or record audio */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        {[{ v: "transcript", l: "📄 Paste transcript" }, { v: "mic", l: "🎤 Record audio" }].map(t => (
+          <button key={t.v} onClick={() => setTab(t.v)} style={{ ...glass({ borderRadius: 12 }), padding: "8px 18px", fontSize: 13, cursor: "pointer", background: tab === t.v ? `${feature.glow}33` : "rgba(255,255,255,0.045)", borderColor: tab === t.v ? feature.glow : "rgba(255,255,255,0.09)", color: tab === t.v ? feature.glow : "#94a3b8", fontWeight: 600 }}>{t.l}</button>
+        ))}
+      </div>
+
+      {/* output format toggle */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        {[{ v: "bilingual", l: "EN + 中文" }, { v: "zh", l: "仅中文" }].map(m => (
           <button key={m.v} onClick={() => setMode(m.v)} style={{ ...glass({ borderRadius: 10 }), padding: "6px 14px", fontSize: 12, cursor: "pointer", background: mode === m.v ? `${feature.glow}33` : "rgba(255,255,255,0.045)", borderColor: mode === m.v ? feature.glow : "rgba(255,255,255,0.09)", color: mode === m.v ? feature.glow : "#94a3b8" }}>{m.l}</button>
         ))}
       </div>
-      <TabSwitch tab={tab} setTab={setTab} glow={feature.glow} />
-      {tab === "mic"
-        ? <MicSection listening={listening} supported={supported} start={start} stop={stop} glow={feature.glow} accumulated={accumulated} interim={interim} label="Tap, then play the video / speak English" />
-        : <TextInput value={manualInput} onChange={setManualInput} label="Paste English subtitles or transcript" accent={feature.glow} placeholder="Paste English subtitle or speech content here..." rows={6} />
-      }
-      <ActionBtn onClick={() => process(src)} loading={processing} disabled={!src.trim()} gradient={feature.gradient}>🎬 Process</ActionBtn>
+
+      {tab === "transcript" ? (
+        <>
+          <TextInput value={transcript} onChange={setTranscript} label="Paste the video transcript / subtitles (English)" accent={feature.glow} placeholder="Copy the transcript from the learning site and paste it here..." rows={8} />
+          <div style={{ fontSize: 11, color: "#64748b", marginTop: -6, marginBottom: 14 }}>
+            💡 Tip: most courses (e.g. DeepLearning.AI) show a transcript panel — select all, copy, paste here.
+          </div>
+        </>
+      ) : (
+        <>
+          <MicSection listening={listening} supported={supported} start={start} stop={stop} glow={feature.glow} accumulated={accumulated} interim={interim} label="Tap, then play the video so the mic can hear it" />
+          <div style={{ fontSize: 11, color: "#64748b", marginBottom: 14 }}>
+            💡 For videos without a transcript. Best on desktop Chrome; play the audio out loud near the mic.
+          </div>
+        </>
+      )}
+
+      <ActionBtn onClick={() => translate(src)} loading={processing} disabled={!src.trim()} gradient={feature.gradient}>🌏 Translate to Chinese</ActionBtn>
       {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
-      {output && <ResultBox content={output} label="Result" accent={feature.glow} />}
+      {output && <ResultBox content={output} label="🌏 Chinese Translation" accent={feature.glow} onDownload={download} />}
     </PageShell>
   );
 }
