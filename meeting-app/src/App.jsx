@@ -86,6 +86,14 @@ function useSpeechRecognition({ lang, onResult, onEnd }) {
   const [listening, setListening] = useState(false);
   const [supported, setSupported] = useState(true);
   const accumulatedRef = useRef("");
+  // intent flag: true while the user wants to keep recording. On mobile the
+  // engine auto-stops after a short silence, so we auto-restart while this is set.
+  const wantRef = useRef(false);
+  // keep latest callbacks in refs so the effect doesn't need them as deps
+  const onResultRef = useRef(onResult);
+  const onEndRef = useRef(onEnd);
+  onResultRef.current = onResult;
+  onEndRef.current = onEnd;
 
   useEffect(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -102,19 +110,39 @@ function useSpeechRecognition({ lang, onResult, onEnd }) {
         else interim += t;
       }
       if (finalChunk) accumulatedRef.current += finalChunk;
-      onResult({ interim, accumulated: accumulatedRef.current });
+      onResultRef.current({ interim, accumulated: accumulatedRef.current });
     };
-    rec.onend = () => { setListening(false); onEnd(accumulatedRef.current); };
-    rec.onerror = () => setListening(false);
+    rec.onend = () => {
+      // Mobile browsers end the session on silence. If the user still wants to
+      // record, restart instead of finishing — this keeps it "continuous".
+      if (wantRef.current) {
+        try { rec.start(); return; } catch { /* fall through to stop */ }
+      }
+      setListening(false);
+      onEndRef.current(accumulatedRef.current);
+    };
+    rec.onerror = (e) => {
+      // "no-speech"/"aborted" are recoverable — let onend auto-restart handle it.
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        wantRef.current = false;
+        setListening(false);
+      }
+    };
     recRef.current = rec;
+    return () => { wantRef.current = false; try { rec.stop(); } catch {} };
   }, [lang]);
 
   const start = useCallback(() => {
     accumulatedRef.current = "";
-    recRef.current?.start();
+    wantRef.current = true;
+    try { recRef.current?.start(); } catch {}
     setListening(true);
   }, []);
-  const stop = useCallback(() => { recRef.current?.stop(); setListening(false); }, []);
+  const stop = useCallback(() => {
+    wantRef.current = false;
+    try { recRef.current?.stop(); } catch {}
+    setListening(false);
+  }, []);
   return { listening, supported, start, stop };
 }
 
