@@ -89,9 +89,9 @@ const FEATURES = [
   },
   {
     id: "vocab",
-    icon: "🔤",
-    title: "Vocab\nLookup",
-    desc: "Look up words from subtitles instantly",
+    icon: "🧠",
+    title: "AI Terms\nExplainer",
+    desc: "Understand AI concepts like MCP, Agent, RAG",
     gradient: "linear-gradient(135deg, #06b6d4 0%, #67e8f9 100%)",
     glow: "#06b6d4",
     tag: "learning",
@@ -772,59 +772,63 @@ function StudyNotesPage({ feature, onBack }) {
 }
 
 function VocabPage({ feature, onBack }) {
-  const [subtitle, setSubtitle] = useState("");
-  const [word, setWord] = useState("");
+  const [term, setTerm] = useState("");
   const [output, setOutput] = useState("");
+  const [activeTerm, setActiveTerm] = useState("");
   const [processing, setProcessing] = useState(false);
-  const [wordList, setWordList] = useState([]);
+  const [history, setHistory] = useState([]);
   const [error, setError] = useState("");
 
-  const lookup = async () => {
-    if (!word.trim()) return;
-    setError(""); setProcessing(true);
-    try {
-      const sys = `You are a bilingual dictionary assistant. For the queried word provide:\n【Pronunciation】IPA 【Part of speech】 【Meaning】2-3 senses\n【Examples】typical usage (English + Chinese) 【Mnemonic】 【Synonyms】2-3\nKeep it concise for quick reference.`;
-      const ctx = subtitle ? `Subtitle context: ${subtitle.slice(0, 200)}\n` : "";
-      const result = await callClaude(`${ctx}Look up the word: ${word}`, sys);
-      setOutput(result);
-      setWordList(wl => wl.find(w => w.word === word) ? wl : [{ word, result }, ...wl.slice(0, 19)]);
-    } catch (e) { setError("Lookup failed: " + e.message); }
-    setProcessing(false);
-  };
+  const SUGGESTIONS = ["MCP", "Skill", "Agent", "RAG", "Token", "Embedding", "Fine-tuning", "Prompt", "Context window", "Hallucination"];
 
-  const exportList = () => {
-    const content = wordList.map(w => `【${w.word}】\n${w.result}\n${"─".repeat(40)}`).join("\n\n");
-    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-    a.download = `vocab_${new Date().toLocaleDateString("en-CA")}.txt`; a.click();
+  const explain = async (q) => {
+    const query = (q ?? term).trim();
+    if (!query) return;
+    setError(""); setProcessing(true); setActiveTerm(query);
+    try {
+      const sys = `你是 AI 领域的科普讲解高手，擅长把专业概念讲得通俗易懂。用户给你一个 AI 相关的专业词汇或概念，请用简体中文严格按以下三段结构讲解：\n\n【是什么】先一句话定义，再用2-4句准确解释清楚它到底指什么、解决什么问题。\n\n【打个比方】用一个生活化的类比或形象的画面来讲解，让完全的外行也能秒懂（描述要具体、有画面感，像在讲一个小故事）。\n\n【动手试试】给出2-3个具体、能立刻上手的小实验或小方案，让用户通过亲自动手来理解这个概念（要写清楚具体做什么，最好举一个可直接复制的例子）。\n\n语言生动简洁，不要堆砌术语，不要客套。`;
+      const result = await callClaude(`请讲解这个 AI 词汇/概念：${query}`, sys);
+      setOutput(result);
+      setHistory(h => h.find(x => x.term === query) ? h : [{ term: query, result }, ...h.slice(0, 19)]);
+    } catch (e) { setError("讲解失败: " + e.message); }
+    setProcessing(false);
   };
 
   return (
     <PageShell feature={feature} onBack={onBack}>
-      <TextInput value={subtitle} onChange={setSubtitle} label="Subtitle context (optional)" placeholder="Paste subtitle text here..." accent={feature.glow} rows={3} />
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 6 }}>Look up word</div>
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 6 }}>输入一个 AI 词汇或概念</div>
         <div style={{ display: "flex", gap: 10 }}>
-          <input value={word} onChange={e => setWord(e.target.value)} onKeyDown={e => e.key === "Enter" && lookup()} placeholder="Type a word, press Enter..."
+          <input value={term} onChange={e => setTerm(e.target.value)} onKeyDown={e => e.key === "Enter" && explain()} placeholder="例如：MCP、Skill、RAG…"
             style={{ ...glass({ borderRadius: 12 }), flex: 1, padding: "11px 14px", color: "#f1f5f9", fontSize: 14, outline: "none", fontFamily: "system-ui" }}
             onFocus={e => e.target.style.borderColor = feature.glow} onBlur={e => e.target.style.borderColor = "rgba(255,255,255,0.09)"} />
-          <ActionBtn onClick={lookup} loading={processing} disabled={!word.trim()} gradient={feature.gradient}>Search</ActionBtn>
+          <ActionBtn onClick={() => explain()} loading={processing} disabled={!term.trim()} gradient={feature.gradient}>讲解</ActionBtn>
         </div>
       </div>
+
+      {/* quick suggestions */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+        {SUGGESTIONS.map(s => (
+          <button key={s} onClick={() => { setTerm(s); explain(s); }} style={{ ...glass({ borderRadius: 999 }), padding: "5px 12px", color: "#94a3b8", fontSize: 12, cursor: "pointer" }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = feature.glow; e.currentTarget.style.color = feature.glow; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.09)"; e.currentTarget.style.color = "#94a3b8"; }}
+          >{s}</button>
+        ))}
+      </div>
+
       {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
-      {output && <ResultBox content={output} label={`🔤 ${word}`} accent={feature.glow} />}
-      {wordList.length > 0 && (
+      {processing && <div style={{ textAlign: "center", padding: 20, color: feature.glow, fontSize: 13 }}>⏳ 正在通俗讲解…</div>}
+      {output && !processing && <ResultBox content={output} label={`🧠 ${activeTerm}`} accent={feature.glow} />}
+
+      {history.length > 0 && (
         <div style={{ marginTop: 24 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-            <span style={{ fontSize: 12, color: "#94a3b8" }}>Word list ({wordList.length})</span>
-            <button onClick={exportList} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>↓ Export</button>
-          </div>
+          <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 10 }}>查过的概念 ({history.length})</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {wordList.map((w, i) => (
-              <button key={i} onClick={() => { setWord(w.word); setOutput(w.result); }} style={{ ...glass({ borderRadius: 10 }), padding: "6px 14px", color: "#cbd5e1", fontSize: 13, cursor: "pointer", fontWeight: 600 }}
+            {history.map((w, i) => (
+              <button key={i} onClick={() => { setActiveTerm(w.term); setOutput(w.result); }} style={{ ...glass({ borderRadius: 10 }), padding: "6px 14px", color: "#cbd5e1", fontSize: 13, cursor: "pointer", fontWeight: 600 }}
                 onMouseEnter={e => { e.currentTarget.style.borderColor = feature.glow; e.currentTarget.style.color = feature.glow; }}
                 onMouseLeave={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.09)"; e.currentTarget.style.color = "#cbd5e1"; }}
-              >{w.word}</button>
+              >{w.term}</button>
             ))}
           </div>
         </div>
