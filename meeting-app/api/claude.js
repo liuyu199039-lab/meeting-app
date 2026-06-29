@@ -1,5 +1,4 @@
 export default async function handler(req, res) {
-  // Allow CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -8,6 +7,10 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const { userMsg, systemMsg } = req.body;
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.status(200).json({ result: "错误：服务器没有读取到 API Key，请检查 Vercel 环境变量设置。" });
+  }
 
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -26,9 +29,18 @@ export default async function handler(req, res) {
     });
 
     const data = await response.json();
-    const text = data.content?.[0]?.text || "处理失败，请重试";
+
+    if (data.error) {
+      return res.status(200).json({ result: "API错误：" + (data.error.message || JSON.stringify(data.error)) });
+    }
+
+    const text = data.content?.[0]?.text;
+    if (!text) {
+      return res.status(200).json({ result: "未知响应：" + JSON.stringify(data).slice(0, 300) });
+    }
+
     res.status(200).json({ result: text });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(200).json({ result: "请求异常：" + err.message });
   }
 }

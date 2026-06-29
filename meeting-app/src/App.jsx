@@ -7,6 +7,10 @@ async function callClaude(userMsg, systemMsg) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ userMsg, systemMsg }),
   });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+  }
   const data = await res.json();
   if (data.error) throw new Error(data.error);
   return data.result;
