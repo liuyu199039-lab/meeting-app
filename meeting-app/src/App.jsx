@@ -125,18 +125,27 @@ function useSpeechRecognition({ lang, onResult, onEnd }) {
         onResultRef.current({ interim: "", accumulated: accumulatedRef.current, finalChunk: flushed });
       }
     };
+    // Restart the engine after it auto-stops (on silence / segment end).
+    // Calling start() synchronously inside onend throws InvalidStateError in
+    // some Chrome builds, which used to freeze recognition after one sentence.
+    // A short delay + retry makes it reliable.
+    const restart = (attempt = 0) => {
+      if (!wantRef.current) return;
+      try {
+        rec.start();
+      } catch {
+        if (attempt < 5) setTimeout(() => restart(attempt + 1), 250);
+      }
+    };
     rec.onend = () => {
       flushInterim();
-      // Mobile browsers end the session on silence. If the user still wants to
-      // record, restart instead of finishing — this keeps it "continuous".
-      if (wantRef.current) {
-        try { rec.start(); return; } catch { /* fall through to stop */ }
-      }
+      if (wantRef.current) { setTimeout(() => restart(), 120); return; }
       setListening(false);
       onEndRef.current(accumulatedRef.current);
     };
     rec.onerror = (e) => {
-      // "no-speech"/"aborted" are recoverable — let onend auto-restart handle it.
+      // permission errors are fatal; everything else (no-speech, aborted,
+      // network) is recoverable — onend will fire and auto-restart.
       if (e.error === "not-allowed" || e.error === "service-not-allowed") {
         wantRef.current = false;
         setListening(false);
@@ -159,6 +168,83 @@ function useSpeechRecognition({ lang, onResult, onEnd }) {
     setListening(false);
   }, []);
   return { listening, supported, start, stop };
+}
+
+// ── useRollingTranslate ──────────────────────────────────────
+// Buffers recognized chunks and auto-translates them after a short pause,
+// producing a live feed of {id, src, tr, pending} segments.
+function useRollingTranslate(sys, debounce = 1400) {
+  const [segments, setSegments] = useState([]);
+  const pendingRef = useRef("");
+  const timerRef = useRef(null);
+  const sysRef = useRef(sys);
+  sysRef.current = sys;
+
+  const translateChunk = useCallback(async (text) => {
+    const src = text.trim();
+    if (!src) return;
+    const id = Date.now() + Math.random();
+    setSegments(s => [...s, { id, src, tr: "", pending: true }]);
+    try {
+      const result = await callClaude(src, sysRef.current);
+      setSegments(s => s.map(seg => seg.id === id ? { ...seg, tr: result, pending: false } : seg));
+    } catch (e) {
+      setSegments(s => s.map(seg => seg.id === id ? { ...seg, tr: "⚠️ " + e.message, pending: false } : seg));
+    }
+  }, []);
+
+  const flush = useCallback(() => {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    const text = pendingRef.current;
+    pendingRef.current = "";
+    if (text.trim()) translateChunk(text);
+  }, [translateChunk]);
+
+  const onFinal = useCallback((chunk) => {
+    if (!chunk || !chunk.trim()) return;
+    pendingRef.current += chunk;
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(flush, debounce);
+  }, [flush, debounce]);
+
+  const reset = useCallback(() => {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    pendingRef.current = "";
+    setSegments([]);
+  }, []);
+
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
+
+  const fullText = segments.filter(s => s.tr && !s.pending).map(s => s.tr).join("\n");
+  return { segments, onFinal, flush, reset, fullText };
+}
+
+// reusable live-translation feed UI
+function LiveFeed({ segments, fullText, glow, label, onDownload }) {
+  if (!segments.length) return null;
+  return (
+    <div style={{ ...glass({ borderColor: `${glow}44` }), marginTop: 16, overflow: "hidden", boxShadow: `0 0 30px ${glow}22` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: `${glow}18`, borderBottom: `1px solid ${glow}22` }}>
+        <span style={{ fontSize: 12, color: glow, fontWeight: 700 }}>{label}</span>
+        {fullText && (
+          <div style={{ display: "flex", gap: 8 }}>
+            {onDownload && <button onClick={() => onDownload(fullText)} style={{ background: "none", border: `1px solid ${glow}44`, color: glow, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer" }}>↓ Download</button>}
+            <button onClick={() => navigator.clipboard.writeText(fullText)} style={{ background: "none", border: `1px solid ${glow}44`, color: glow, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer" }}>Copy all</button>
+          </div>
+        )}
+      </div>
+      <div style={{ maxHeight: 360, overflowY: "auto", padding: "4px 0" }}>
+        {segments.map(seg => (
+          <div key={seg.id} style={{ padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+            <div style={{ fontSize: 11, color: "#475569", marginBottom: 3 }}>{seg.src}</div>
+            <div style={{ fontSize: 15, color: seg.pending ? "#64748b" : "#e2e8f0", lineHeight: 1.6 }}>
+              {seg.pending ? "⏳ translating…" : seg.tr}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 // ── Shared UI ────────────────────────────────────────────────
@@ -299,61 +385,21 @@ function TranslatePage({ feature, onBack }) {
     : "You are a professional Japanese-English interpreter. Translate Japanese to natural, accurate English. Output only the translation.";
 
   const [interim, setInterim] = useState("");
-  const [accumulated, setAccumulated] = useState("");
-  const [segments, setSegments] = useState([]); // live feed: {src, tr, time, pending}
   const [translation, setTranslation] = useState(""); // manual-mode single result
   const [translating, setTranslating] = useState(false);
   const [manualInput, setManualInput] = useState("");
   const [tab, setTab] = useState("mic");
   const [error, setError] = useState("");
 
-  // ── live rolling translation buffer ──
-  const pendingRef = useRef("");   // recognized JP text waiting to be translated
-  const timerRef = useRef(null);
-  const DEBOUNCE = 1400;           // translate a chunk after this pause (ms)
-
-  const translateChunk = useCallback(async (text) => {
-    const src = text.trim();
-    if (!src) return;
-    const id = Date.now() + Math.random();
-    setSegments(s => [...s, { id, src, tr: "", time: new Date().toLocaleTimeString(), pending: true }]);
-    try {
-      const result = await callClaude(src, sys);
-      setSegments(s => s.map(seg => seg.id === id ? { ...seg, tr: result, pending: false } : seg));
-    } catch (e) {
-      setSegments(s => s.map(seg => seg.id === id ? { ...seg, tr: "⚠️ " + e.message, pending: false } : seg));
-    }
-  }, [sys]);
-
-  const flushPending = useCallback(() => {
-    const text = pendingRef.current;
-    pendingRef.current = "";
-    if (text.trim()) translateChunk(text);
-  }, [translateChunk]);
+  const { segments, onFinal, flush, reset, fullText } = useRollingTranslate(sys);
 
   const { listening, supported, start, stop } = useSpeechRecognition({
     lang: "ja-JP",
-    onResult: ({ interim, accumulated, finalChunk }) => {
-      setInterim(interim);
-      setAccumulated(accumulated);
-      if (finalChunk && finalChunk.trim()) {
-        // buffer the new chunk, then translate it after a short pause
-        pendingRef.current += finalChunk;
-        if (timerRef.current) clearTimeout(timerRef.current);
-        timerRef.current = setTimeout(flushPending, DEBOUNCE);
-      }
-    },
-    onEnd: () => {
-      // translate whatever is left when recording stops
-      if (timerRef.current) clearTimeout(timerRef.current);
-      flushPending();
-    },
+    onResult: ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); },
+    onEnd: () => flush(),
   });
 
-  // cleanup timer on unmount
-  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
-
-  const startLive = () => { setSegments([]); setInterim(""); setAccumulated(""); pendingRef.current = ""; setError(""); start(); };
+  const startLive = () => { reset(); setInterim(""); setError(""); start(); };
 
   const translateManual = async (text) => {
     setError(""); setTranslating(true);
@@ -364,9 +410,8 @@ function TranslatePage({ feature, onBack }) {
     setTranslating(false);
   };
 
-  const fullText = segments.filter(s => s.tr && !s.pending).map(s => s.tr).join("\n");
-  const download = () => {
-    const blob = new Blob([fullText], { type: "text/plain;charset=utf-8" });
+  const download = (text) => {
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
     a.download = `translation_${new Date().toLocaleDateString("en-CA")}.txt`; a.click();
   };
@@ -394,30 +439,8 @@ function TranslatePage({ feature, onBack }) {
             </div>
           )}
 
-          {/* live translation feed */}
-          {segments.length > 0 && (
-            <div style={{ ...glass({ borderColor: `${feature.glow}44` }), overflow: "hidden", boxShadow: `0 0 30px ${feature.glow}22` }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: `${feature.glow}18`, borderBottom: `1px solid ${feature.glow}22` }}>
-                <span style={{ fontSize: 12, color: feature.glow, fontWeight: 700 }}>Live translation → {targetLabel}</span>
-                {fullText && (
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button onClick={download} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer" }}>↓ Download</button>
-                    <button onClick={() => navigator.clipboard.writeText(fullText)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer" }}>Copy all</button>
-                  </div>
-                )}
-              </div>
-              <div style={{ maxHeight: 360, overflowY: "auto", padding: "4px 0" }}>
-                {segments.map(seg => (
-                  <div key={seg.id} style={{ padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-                    <div style={{ fontSize: 11, color: "#475569", marginBottom: 3 }}>JP: {seg.src}</div>
-                    <div style={{ fontSize: 15, color: seg.pending ? "#64748b" : "#e2e8f0", lineHeight: 1.6 }}>
-                      {seg.pending ? "⏳ translating…" : seg.tr}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+          <LiveFeed segments={segments} fullText={fullText} glow={feature.glow} label={`Live translation → ${targetLabel}`} onDownload={download} />
+          {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
         </>
       ) : (
         <>
@@ -429,7 +452,6 @@ function TranslatePage({ feature, onBack }) {
           {translation && !translating && <ResultBox content={translation} label={`Translation → ${targetLabel}`} accent={feature.glow} />}
         </>
       )}
-      {tab === "mic" && error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
     </PageShell>
   );
 }
@@ -482,21 +504,25 @@ function MeetingNotesPage({ feature, onBack }) {
 }
 
 function VideoTranslatePage({ feature, onBack }) {
-  const [accumulated, setAccumulated] = useState("");
+  const ZH_SYS = "你是专业字幕翻译。把英文内容准确、自然地翻译成简体中文，专业术语在中文后用括号保留英文。只输出中文翻译。";
   const [interim, setInterim] = useState("");
   const [output, setOutput] = useState("");
   const [processing, setProcessing] = useState(false);
   const [tab, setTab] = useState("transcript"); // "transcript" (paste) | "mic"
   const [transcript, setTranscript] = useState("");
-  const [mode, setMode] = useState("bilingual"); // "bilingual" | "zh"
+  const [mode, setMode] = useState("bilingual"); // transcript output: "bilingual" | "zh"
   const [error, setError] = useState("");
 
+  // mic mode → live rolling translation (English chunk → Chinese)
+  const { segments, onFinal, flush, reset, fullText } = useRollingTranslate(ZH_SYS);
   const { listening, supported, start, stop } = useSpeechRecognition({
     lang: "en-US",
-    onResult: ({ interim, accumulated }) => { setInterim(interim); setAccumulated(accumulated); },
-    onEnd: () => {},
+    onResult: ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); },
+    onEnd: () => flush(),
   });
+  const startLive = () => { reset(); setInterim(""); setError(""); start(); };
 
+  // transcript mode → translate the whole pasted text at once
   const translate = async (text) => {
     if (!text.trim()) return;
     setError(""); setProcessing(true);
@@ -511,13 +537,12 @@ function VideoTranslatePage({ feature, onBack }) {
     setProcessing(false);
   };
 
-  const download = () => {
-    const blob = new Blob([output], { type: "text/plain;charset=utf-8" });
+  const download = (text) => {
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
     a.download = `video_translation_${new Date().toLocaleDateString("en-CA")}.txt`; a.click();
   };
 
-  const src = tab === "mic" ? accumulated : transcript;
   return (
     <PageShell feature={feature} onBack={onBack}>
       {/* source: paste transcript or record audio */}
@@ -527,32 +552,46 @@ function VideoTranslatePage({ feature, onBack }) {
         ))}
       </div>
 
-      {/* output format toggle */}
-      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-        {[{ v: "bilingual", l: "EN + 中文" }, { v: "zh", l: "仅中文" }].map(m => (
-          <button key={m.v} onClick={() => setMode(m.v)} style={{ ...glass({ borderRadius: 10 }), padding: "6px 14px", fontSize: 12, cursor: "pointer", background: mode === m.v ? `${feature.glow}33` : "rgba(255,255,255,0.045)", borderColor: mode === m.v ? feature.glow : "rgba(255,255,255,0.09)", color: mode === m.v ? feature.glow : "#94a3b8" }}>{m.l}</button>
-        ))}
-      </div>
-
       {tab === "transcript" ? (
         <>
+          {/* output format toggle (transcript mode only) */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+            {[{ v: "bilingual", l: "EN + 中文" }, { v: "zh", l: "仅中文" }].map(m => (
+              <button key={m.v} onClick={() => setMode(m.v)} style={{ ...glass({ borderRadius: 10 }), padding: "6px 14px", fontSize: 12, cursor: "pointer", background: mode === m.v ? `${feature.glow}33` : "rgba(255,255,255,0.045)", borderColor: mode === m.v ? feature.glow : "rgba(255,255,255,0.09)", color: mode === m.v ? feature.glow : "#94a3b8" }}>{m.l}</button>
+            ))}
+          </div>
           <TextInput value={transcript} onChange={setTranscript} label="Paste the video transcript / subtitles (English)" accent={feature.glow} placeholder="Copy the transcript from the learning site and paste it here..." rows={8} />
           <div style={{ fontSize: 11, color: "#64748b", marginTop: -6, marginBottom: 14 }}>
             💡 Tip: most courses (e.g. DeepLearning.AI) show a transcript panel — select all, copy, paste here.
           </div>
+          <ActionBtn onClick={() => translate(transcript)} loading={processing} disabled={!transcript.trim()} gradient={feature.gradient}>🌏 Translate to Chinese</ActionBtn>
+          {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
+          {output && <ResultBox content={output} label="🌏 Chinese Translation" accent={feature.glow} onDownload={download} />}
         </>
       ) : (
         <>
-          <MicSection listening={listening} supported={supported} start={start} stop={stop} glow={feature.glow} accumulated={accumulated} interim={interim} label="Tap, then play the video so the mic can hear it" />
-          <div style={{ fontSize: 11, color: "#64748b", marginBottom: 14 }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 16, padding: "24px 0" }}>
+            <MicButton listening={listening} onStart={startLive} onStop={stop} glow={feature.glow} disabled={!supported} />
+            <Waveform active={listening} glow={feature.glow} />
+            <div style={{ fontSize: 13, color: listening ? feature.glow : "#64748b", fontWeight: 600, textAlign: "center" }}>
+              {!supported ? "⚠️ Please use Chrome browser"
+                : listening ? "🔴 Live translating... play the video, tap to stop"
+                : "Tap once — it transcribes & translates as the video plays"}
+            </div>
+          </div>
+          {(interim || (listening && !segments.length)) && (
+            <div style={{ ...glass({ borderRadius: 14 }), padding: 12, marginBottom: 14 }}>
+              <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>Listening</div>
+              <div style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.6 }}>{interim || "…"}</div>
+            </div>
+          )}
+          <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>
             💡 For videos without a transcript. Best on desktop Chrome; play the audio out loud near the mic.
           </div>
+          <LiveFeed segments={segments} fullText={fullText} glow={feature.glow} label="🌏 Live translation → Chinese" onDownload={download} />
+          {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
         </>
       )}
-
-      <ActionBtn onClick={() => translate(src)} loading={processing} disabled={!src.trim()} gradient={feature.gradient}>🌏 Translate to Chinese</ActionBtn>
-      {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
-      {output && <ResultBox content={output} label="🌏 Chinese Translation" accent={feature.glow} onDownload={download} />}
     </PageShell>
   );
 }
