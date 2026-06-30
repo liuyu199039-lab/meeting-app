@@ -326,7 +326,7 @@ function abToB64(ab) {
 // Pro engine: AudioWorklet captures gapless audio; we slice it on natural
 // pauses (simple silence detection) and send each clip to gpt-4o-transcribe.
 // Same interface as the other engines so it slots into the rolling pipeline.
-function useOpenAITranscribe({ language, onResult, onEnd }) {
+function useOpenAITranscribe({ language, onResult, onEnd, onError, onStatus }) {
   const [listening, setListening] = useState(false);
   const supported = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia
     && typeof window !== "undefined" && !!(window.AudioContext || window.webkitAudioContext);
@@ -334,10 +334,13 @@ function useOpenAITranscribe({ language, onResult, onEnd }) {
   const accRef = useRef("");
   const onResultRef = useRef(onResult); onResultRef.current = onResult;
   const onEndRef = useRef(onEnd); onEndRef.current = onEnd;
+  const onErrorRef = useRef(onError); onErrorRef.current = onError;
+  const onStatusRef = useRef(onStatus); onStatusRef.current = onStatus;
   const ctxRef = useRef(null), streamRef = useRef(null), nodeRef = useRef(null);
   const bufRef = useRef([]); const bufLenRef = useRef(0);
   const srRef = useRef(16000); const silRef = useRef(0);
   const chainRef = useRef(Promise.resolve());
+  const sentRef = useRef(0); // clips sent (for status)
 
   const transcribe = useCallback(async (int16, sr) => {
     const wav = encodeWav(int16, sr);
@@ -347,12 +350,13 @@ function useOpenAITranscribe({ language, onResult, onEnd }) {
         body: JSON.stringify({ audio: abToB64(wav), language }),
       });
       const j = await r.json();
+      if (j.error) { onErrorRef.current?.("转写失败：" + j.error); return; }
       const txt = (j.text || "").trim();
       if (txt) {
         accRef.current += (accRef.current ? " " : "") + txt;
         onResultRef.current({ interim: "", accumulated: accRef.current, finalChunk: txt });
       }
-    } catch { /* skip this clip */ }
+    } catch (e) { onErrorRef.current?.("转写请求异常：" + e.message); }
   }, [language]);
 
   const flush = useCallback(() => {
@@ -362,6 +366,8 @@ function useOpenAITranscribe({ language, onResult, onEnd }) {
     let off = 0; for (const f of bufRef.current) { merged.set(f, off); off += f.length; }
     bufRef.current = []; bufLenRef.current = 0; silRef.current = 0;
     const sr = srRef.current;
+    sentRef.current += 1;
+    onStatusRef.current?.(`🎙️ 已捕获 ${sentRef.current} 段，识别中…`);
     chainRef.current = chainRef.current.then(() => transcribe(merged, sr)); // keep order
   }, [transcribe]);
 
@@ -373,7 +379,7 @@ function useOpenAITranscribe({ language, onResult, onEnd }) {
   }, []);
 
   const start = useCallback(async () => {
-    accRef.current = ""; bufRef.current = []; bufLenRef.current = 0; silRef.current = 0;
+    accRef.current = ""; bufRef.current = []; bufLenRef.current = 0; silRef.current = 0; sentRef.current = 0;
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
     streamRef.current = stream;
     let ctx;
@@ -822,18 +828,19 @@ function TranslatePage({ feature, onBack }) {
   const [tab, setTab] = useState("mic");
   const [error, setError] = useState("");
 
+  const [status, setStatus] = useState("");
   const { segments, onFinal, flush, reset, fullText } = useRollingTranslate(sys);
 
-  const [engine, setEngine] = useState("pro"); // "pro" = Deepgram, "free" = browser
+  const [engine, setEngine] = useState("pro"); // "pro" = OpenAI, "free" = browser
   const handleResult = ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); };
-  const dg = useOpenAITranscribe({ language: "ja", onResult: handleResult, onEnd: () => flush() });
+  const dg = useOpenAITranscribe({ language: "ja", onResult: handleResult, onEnd: () => flush(), onError: setError, onStatus: setStatus });
   const sr = useSpeechRecognition({ lang: "ja-JP", onResult: handleResult, onEnd: () => flush() });
   const active = engine === "pro" ? dg : sr;
   const { listening, supported, stop } = active;
 
   // keep prior transcripts across mic sessions — only clear interim/error
   const startLive = async () => {
-    setInterim(""); setError("");
+    setInterim(""); setError(""); setStatus("");
     if (engine === "pro") {
       try { await dg.start(); return; }
       catch (e) { setEngine("free"); setError("Pro 引擎不可用(" + e.message + ")，已切到 Free。"); try { sr.start(); } catch {} return; }
@@ -870,13 +877,14 @@ function TranslatePage({ feature, onBack }) {
                 : listening ? "🔴 Live translating... keep talking, tap to stop"
                 : "Tap once — it translates as you speak, no need to hold"}
             </div>
+            {engine === "pro" && listening && status && <div style={{ fontSize: 12, color: "#64748b" }}>{status}</div>}
           </div>
 
           {/* live recognized text (current line being heard) */}
           {(interim || (listening && !segments.length)) && (
             <div style={{ ...glass({ borderRadius: 14 }), padding: 12, marginBottom: 14 }}>
               <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>Listening</div>
-              <div style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.6 }}>{interim || "…"}</div>
+              <div style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.6 }}>{interim || (engine === "pro" ? "OpenAI 模式：说一句后停顿一下，识别中会显示在下方" : "…")}</div>
             </div>
           )}
 
@@ -916,17 +924,18 @@ function VideoTranslatePage({ feature, onBack }) {
   const [mode, setMode] = useState("bilingual"); // transcript output: "bilingual" | "zh"
   const [error, setError] = useState("");
 
+  const [status, setStatus] = useState("");
   // mic mode → live rolling translation (English chunk → Chinese)
   const { segments, onFinal, flush, reset, fullText } = useRollingTranslate(ZH_SYS);
   const [engine, setEngine] = useState("pro");
   const handleResult = ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); };
-  const dg = useOpenAITranscribe({ language: "en", onResult: handleResult, onEnd: () => flush() });
+  const dg = useOpenAITranscribe({ language: "en", onResult: handleResult, onEnd: () => flush(), onError: setError, onStatus: setStatus });
   const sr = useSpeechRecognition({ lang: "en-US", onResult: handleResult, onEnd: () => flush() });
   const active = engine === "pro" ? dg : sr;
   const { listening, supported, stop } = active;
   // keep prior transcripts across mic sessions — only clear interim/error
   const startLive = async () => {
-    setInterim(""); setError("");
+    setInterim(""); setError(""); setStatus("");
     if (engine === "pro") {
       try { await dg.start(); return; }
       catch (e) { setEngine("free"); setError("Pro 引擎不可用(" + e.message + ")，已切到 Free。"); try { sr.start(); } catch {} return; }
@@ -992,11 +1001,12 @@ function VideoTranslatePage({ feature, onBack }) {
                 : listening ? "🔴 Live translating... play the video, tap to stop"
                 : "Tap once — it transcribes & translates as the video plays"}
             </div>
+            {engine === "pro" && listening && status && <div style={{ fontSize: 12, color: "#64748b" }}>{status}</div>}
           </div>
           {(interim || (listening && !segments.length)) && (
             <div style={{ ...glass({ borderRadius: 14 }), padding: 12, marginBottom: 14 }}>
               <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>Listening</div>
-              <div style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.6 }}>{interim || "…"}</div>
+              <div style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.6 }}>{interim || (engine === "pro" ? "OpenAI 模式：说一句后停顿一下，识别中会显示在下方" : "…")}</div>
             </div>
           )}
           <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>
