@@ -249,7 +249,8 @@ function useDeepgramSTT({ language, onResult, onEnd }) {
     const source = ctx.createMediaStreamSource(stream);
     const node = new AudioWorkletNode(ctx, "pcm-processor");
     nodeRef.current = node;
-    source.connect(node); // not connected to destination → no echo
+    source.connect(node);
+    node.connect(ctx.destination); // required so the graph "pulls" the worklet; our processor outputs silence, so no echo
 
     // 3. open WebSocket straight to Deepgram (send PCM at the context's rate)
     const params = new URLSearchParams({
@@ -384,6 +385,7 @@ function useOpenAITranscribe({ language, onResult, onEnd }) {
     const node = new AudioWorkletNode(ctx, "pcm-processor");
     nodeRef.current = node;
     source.connect(node);
+    node.connect(ctx.destination); // required so the graph "pulls" the worklet; processor outputs silence, so no echo
 
     const SIL = 0.012; // silence RMS threshold
     node.port.onmessage = (e) => {
