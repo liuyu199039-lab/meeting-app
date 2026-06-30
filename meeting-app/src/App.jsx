@@ -253,7 +253,7 @@ function useDeepgramSTT({ language, onResult, onEnd }) {
 
     // 3. open WebSocket straight to Deepgram (send PCM at the context's rate)
     const params = new URLSearchParams({
-      model: "nova-2", language, encoding: "linear16",
+      model: "nova-3", language, encoding: "linear16",
       sample_rate: String(Math.round(ctx.sampleRate)), channels: "1",
       interim_results: "true", punctuate: "true", smart_format: "true", endpointing: "300",
     });
