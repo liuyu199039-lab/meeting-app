@@ -338,7 +338,7 @@ function useOpenAITranscribe({ language, onResult, onEnd, onError, onStatus }) {
   const onStatusRef = useRef(onStatus); onStatusRef.current = onStatus;
   const ctxRef = useRef(null), streamRef = useRef(null), nodeRef = useRef(null);
   const bufRef = useRef([]); const bufLenRef = useRef(0);
-  const srRef = useRef(16000); const silRef = useRef(0);
+  const srRef = useRef(16000); const silRef = useRef(0); const voicedRef = useRef(0);
   const chainRef = useRef(Promise.resolve());
   const sentRef = useRef(0); // clips sent (for status)
 
@@ -360,12 +360,19 @@ function useOpenAITranscribe({ language, onResult, onEnd, onError, onStatus }) {
   }, [language]);
 
   const flush = useCallback(() => {
-    if (!bufRef.current.length) return;
-    const total = bufLenRef.current;
-    const merged = new Int16Array(total);
-    let off = 0; for (const f of bufRef.current) { merged.set(f, off); off += f.length; }
-    bufRef.current = []; bufLenRef.current = 0; silRef.current = 0;
     const sr = srRef.current;
+    const voicedSecs = voicedRef.current / sr;
+    const grab = () => {
+      const total = bufLenRef.current;
+      const merged = new Int16Array(total);
+      let off = 0; for (const f of bufRef.current) { merged.set(f, off); off += f.length; }
+      bufRef.current = []; bufLenRef.current = 0; silRef.current = 0; voicedRef.current = 0;
+      return merged;
+    };
+    if (!bufRef.current.length) return;
+    // drop near-silent clips — avoids Whisper "I don't know." style hallucinations
+    if (voicedSecs < 0.6) { grab(); return; }
+    const merged = grab();
     sentRef.current += 1;
     onStatusRef.current?.(`🎙️ 已捕获 ${sentRef.current} 段，识别中…`);
     chainRef.current = chainRef.current.then(() => transcribe(merged, sr)); // keep order
@@ -379,7 +386,7 @@ function useOpenAITranscribe({ language, onResult, onEnd, onError, onStatus }) {
   }, []);
 
   const start = useCallback(async () => {
-    accRef.current = ""; bufRef.current = []; bufLenRef.current = 0; silRef.current = 0; sentRef.current = 0;
+    accRef.current = ""; bufRef.current = []; bufLenRef.current = 0; silRef.current = 0; voicedRef.current = 0; sentRef.current = 0;
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
     streamRef.current = stream;
     let ctx;
@@ -399,11 +406,12 @@ function useOpenAITranscribe({ language, onResult, onEnd, onError, onStatus }) {
       bufRef.current.push(frame); bufLenRef.current += frame.length;
       let sum = 0; for (let i = 0; i < frame.length; i++) { const v = frame[i] / 32768; sum += v * v; }
       const rms = Math.sqrt(sum / frame.length);
-      if (rms < SIL) silRef.current += frame.length; else silRef.current = 0;
+      if (rms < SIL) silRef.current += frame.length; else { silRef.current = 0; voicedRef.current += frame.length; }
       const sr = srRef.current;
-      const secs = bufLenRef.current / sr, silSecs = silRef.current / sr;
-      // cut on a pause after ≥1.2s of audio, or force-cut at 12s
-      if ((secs >= 1.2 && silSecs >= 0.4) || secs >= 12) flush();
+      const secs = bufLenRef.current / sr, silSecs = silRef.current / sr, voicedSecs = voicedRef.current / sr;
+      // coarse slicing: only cut on a clear pause after enough real speech, or
+      // force-cut at 18s. Fewer, larger clips → far fewer requests (RPM) + better accuracy.
+      if ((secs >= 4 && silSecs >= 0.6 && voicedSecs >= 1.2) || secs >= 18) flush();
     };
     setListening(true);
   }, [flush]);
