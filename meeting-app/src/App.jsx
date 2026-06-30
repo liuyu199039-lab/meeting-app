@@ -302,6 +302,113 @@ function useDeepgramSTT({ language, onResult, onEnd }) {
   return { listening, supported, start, stop };
 }
 
+// encode mono Int16 PCM as a WAV file (ArrayBuffer)
+function encodeWav(int16, sampleRate) {
+  const n = int16.length;
+  const ab = new ArrayBuffer(44 + n * 2);
+  const dv = new DataView(ab);
+  const ws = (off, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); };
+  ws(0, "RIFF"); dv.setUint32(4, 36 + n * 2, true); ws(8, "WAVE");
+  ws(12, "fmt "); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, sampleRate, true); dv.setUint32(28, sampleRate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+  ws(36, "data"); dv.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) dv.setInt16(44 + i * 2, int16[i], true);
+  return ab;
+}
+function abToB64(ab) {
+  const bytes = new Uint8Array(ab); let bin = ""; const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  return btoa(bin);
+}
+
+// ── useOpenAITranscribe ──────────────────────────────────────
+// Pro engine: AudioWorklet captures gapless audio; we slice it on natural
+// pauses (simple silence detection) and send each clip to gpt-4o-transcribe.
+// Same interface as the other engines so it slots into the rolling pipeline.
+function useOpenAITranscribe({ language, onResult, onEnd }) {
+  const [listening, setListening] = useState(false);
+  const supported = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia
+    && typeof window !== "undefined" && !!(window.AudioContext || window.webkitAudioContext);
+
+  const accRef = useRef("");
+  const onResultRef = useRef(onResult); onResultRef.current = onResult;
+  const onEndRef = useRef(onEnd); onEndRef.current = onEnd;
+  const ctxRef = useRef(null), streamRef = useRef(null), nodeRef = useRef(null);
+  const bufRef = useRef([]); const bufLenRef = useRef(0);
+  const srRef = useRef(16000); const silRef = useRef(0);
+  const chainRef = useRef(Promise.resolve());
+
+  const transcribe = useCallback(async (int16, sr) => {
+    const wav = encodeWav(int16, sr);
+    try {
+      const r = await fetch("/api/transcribe", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audio: abToB64(wav), language }),
+      });
+      const j = await r.json();
+      const txt = (j.text || "").trim();
+      if (txt) {
+        accRef.current += (accRef.current ? " " : "") + txt;
+        onResultRef.current({ interim: "", accumulated: accRef.current, finalChunk: txt });
+      }
+    } catch { /* skip this clip */ }
+  }, [language]);
+
+  const flush = useCallback(() => {
+    if (!bufRef.current.length) return;
+    const total = bufLenRef.current;
+    const merged = new Int16Array(total);
+    let off = 0; for (const f of bufRef.current) { merged.set(f, off); off += f.length; }
+    bufRef.current = []; bufLenRef.current = 0; silRef.current = 0;
+    const sr = srRef.current;
+    chainRef.current = chainRef.current.then(() => transcribe(merged, sr)); // keep order
+  }, [transcribe]);
+
+  const cleanup = useCallback(() => {
+    try { nodeRef.current?.disconnect(); } catch {}
+    try { streamRef.current?.getTracks().forEach(t => t.stop()); } catch {}
+    try { if (ctxRef.current && ctxRef.current.state !== "closed") ctxRef.current.close(); } catch {}
+    nodeRef.current = null; streamRef.current = null; ctxRef.current = null;
+  }, []);
+
+  const start = useCallback(async () => {
+    accRef.current = ""; bufRef.current = []; bufLenRef.current = 0; silRef.current = 0;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+    streamRef.current = stream;
+    let ctx;
+    try { ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 }); }
+    catch { ctx = new (window.AudioContext || window.webkitAudioContext)(); }
+    ctxRef.current = ctx; srRef.current = Math.round(ctx.sampleRate);
+    await ctx.audioWorklet.addModule("/pcm-worklet.js");
+    const source = ctx.createMediaStreamSource(stream);
+    const node = new AudioWorkletNode(ctx, "pcm-processor");
+    nodeRef.current = node;
+    source.connect(node);
+
+    const SIL = 0.012; // silence RMS threshold
+    node.port.onmessage = (e) => {
+      const frame = new Int16Array(e.data);
+      bufRef.current.push(frame); bufLenRef.current += frame.length;
+      let sum = 0; for (let i = 0; i < frame.length; i++) { const v = frame[i] / 32768; sum += v * v; }
+      const rms = Math.sqrt(sum / frame.length);
+      if (rms < SIL) silRef.current += frame.length; else silRef.current = 0;
+      const sr = srRef.current;
+      const secs = bufLenRef.current / sr, silSecs = silRef.current / sr;
+      // cut on a pause after ≥1.2s of audio, or force-cut at 12s
+      if ((secs >= 1.2 && silSecs >= 0.4) || secs >= 12) flush();
+    };
+    setListening(true);
+  }, [flush]);
+
+  const stop = useCallback(() => {
+    flush(); cleanup(); setListening(false);
+    chainRef.current.then(() => onEndRef.current?.(accRef.current));
+  }, [flush, cleanup]);
+
+  useEffect(() => () => cleanup(), [cleanup]);
+  return { listening, supported, start, stop };
+}
+
 // ── useRollingTranslate ──────────────────────────────────────
 // Buffers recognized chunks and auto-translates them a paragraph at a time:
 // it waits until either ~maxChars of text has piled up, or a longer pause
@@ -691,7 +798,7 @@ function EngineToggle({ engine, setEngine, glow, disabled }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
       <span style={{ fontSize: 11, color: "#64748b" }}>识别引擎:</span>
-      {[{ v: "pro", l: "⚡ Pro (Deepgram)" }, { v: "free", l: "Free (浏览器)" }].map(t => (
+      {[{ v: "pro", l: "⚡ Pro (OpenAI)" }, { v: "free", l: "Free (浏览器)" }].map(t => (
         <button key={t.v} onClick={() => !disabled && setEngine(t.v)} disabled={disabled} style={{ ...glass({ borderRadius: 999 }), padding: "5px 12px", fontSize: 12, cursor: disabled ? "not-allowed" : "pointer", background: engine === t.v ? `${glow}33` : "rgba(255,255,255,0.045)", borderColor: engine === t.v ? glow : "rgba(255,255,255,0.09)", color: engine === t.v ? glow : "#94a3b8", fontWeight: 600 }}>{t.l}</button>
       ))}
     </div>
@@ -717,7 +824,7 @@ function TranslatePage({ feature, onBack }) {
 
   const [engine, setEngine] = useState("pro"); // "pro" = Deepgram, "free" = browser
   const handleResult = ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); };
-  const dg = useDeepgramSTT({ language: "ja", onResult: handleResult, onEnd: () => flush() });
+  const dg = useOpenAITranscribe({ language: "ja", onResult: handleResult, onEnd: () => flush() });
   const sr = useSpeechRecognition({ lang: "ja-JP", onResult: handleResult, onEnd: () => flush() });
   const active = engine === "pro" ? dg : sr;
   const { listening, supported, stop } = active;
@@ -811,7 +918,7 @@ function VideoTranslatePage({ feature, onBack }) {
   const { segments, onFinal, flush, reset, fullText } = useRollingTranslate(ZH_SYS);
   const [engine, setEngine] = useState("pro");
   const handleResult = ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); };
-  const dg = useDeepgramSTT({ language: "en", onResult: handleResult, onEnd: () => flush() });
+  const dg = useOpenAITranscribe({ language: "en", onResult: handleResult, onEnd: () => flush() });
   const sr = useSpeechRecognition({ lang: "en-US", onResult: handleResult, onEnd: () => flush() });
   const active = engine === "pro" ? dg : sr;
   const { listening, supported, stop } = active;
