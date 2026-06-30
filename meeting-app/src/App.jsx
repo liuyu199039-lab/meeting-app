@@ -16,24 +16,37 @@ async function callClaude(userMsg, systemMsg) {
   return data.result;
 }
 
-// ── Study-notes store (persisted in localStorage) ────────────
-const NOTES_KEY = "studyNotes_v1";
-function loadNotes() {
-  try { return JSON.parse(localStorage.getItem(NOTES_KEY) || "[]"); } catch { return []; }
+// ── Notes stores (persisted in localStorage) ─────────────────
+// Two libraries: "study" (Study Notes) and "meeting" (Meeting Minutes).
+const STORE_KEYS = { study: "studyNotes_v1", meeting: "meetingMinutes_v1" };
+const storeEvent = (kind) => `${kind}-notes-changed`;
+function loadNotes(kind) {
+  try { return JSON.parse(localStorage.getItem(STORE_KEYS[kind]) || "[]"); } catch { return []; }
 }
-function saveNotesList(list) {
-  try { localStorage.setItem(NOTES_KEY, JSON.stringify(list)); } catch {}
-  // let other mounted pages know the store changed
-  window.dispatchEvent(new Event("studynotes-changed"));
+function saveNotesList(kind, list) {
+  try { localStorage.setItem(STORE_KEYS[kind], JSON.stringify(list)); } catch {}
+  window.dispatchEvent(new Event(storeEvent(kind))); // notify mounted pages
 }
-function addNote(note) {
-  const list = loadNotes();
+function addNote(kind, note) {
+  const list = loadNotes(kind);
   list.unshift(note);
-  saveNotesList(list);
+  saveNotesList(kind, list);
 }
-function removeNote(id) {
-  saveNotesList(loadNotes().filter(n => n.id !== id));
+function removeNote(kind, id) {
+  saveNotesList(kind, loadNotes(kind).filter(n => n.id !== id));
 }
+// pull a "标题：xxx" line out of generated text, returning {title, body}
+function parseTitle(text, fallback) {
+  const firstLine = text.split("\n").find(l => l.trim()) || "";
+  let title = firstLine.replace(/^[#\s]*标题[:：]?\s*/, "").replace(/^[#\s]+/, "").trim().slice(0, 20);
+  if (!title) title = fallback;
+  const body = text.replace(/^.*标题[:：].*\n/, "").trim() || text;
+  return { title, body };
+}
+const NOTE_SYS = {
+  study: `你是专业学习笔记助手。根据这次学习的内容，生成【简明扼要、只抓重点】的中文笔记。第一行输出 "标题：" 加不超过15字概括主题的标题，空一行后用精炼的分条要点（每条一句话），只保留最关键的知识点和结论，难点用★标注，去掉冗余和客套，不要长段落。`,
+  meeting: `你是专业会议秘书。根据这次会议的内容，生成【简明扼要】的中文会议记录。第一行输出 "标题：" 加不超过15字概括会议主题的标题，空一行后按以下结构分条精炼列出：\n【核心议题】\n【决策结果】\n【行动项】（含负责人、截止时间，如有提及）\n【待跟进】\n只保留关键信息，去掉寒暄和无关内容。`,
+};
 
 // ── Feature definitions ──────────────────────────────────────
 const FEATURES = [
@@ -61,11 +74,11 @@ const FEATURES = [
     id: "meeting-notes",
     icon: "📋",
     title: "Meeting\nMinutes",
-    desc: "Auto-generate structured meeting notes",
+    desc: "Saved meeting minutes by date",
     gradient: "linear-gradient(135deg, #10b981 0%, #5eead4 100%)",
     glow: "#10b981",
     tag: "meeting",
-    hasMic: true,
+    hasMic: false,
   },
   {
     id: "video-zh",
@@ -273,34 +286,27 @@ function LiveFeed({ segments, fullText, glow, label, onDownload, onClear }) {
   );
 }
 
-// reusable "summarize into study notes" block — takes the accumulated text and
-// asks the AI for structured Chinese study notes.
-function SummarizeNotes({ text, glow, gradient }) {
+// reusable "summarize accumulated text into a saved note" block.
+// kind = "study" → Study Notes; "meeting" → Meeting Minutes.
+function SummarizeBlock({ text, glow, gradient, kind }) {
   const [notes, setNotes] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
   if (!text || !text.trim()) return null;
 
+  const isMeeting = kind === "meeting";
+  const btnLabel = isMeeting ? "📝 Summarize meeting minutes" : "📝 Summarize into notes";
+  const resultLabel = isMeeting ? "📝 Meeting Minutes" : "📝 Study Notes";
+  const savedTo = isMeeting ? "Meeting Minutes" : "Study Notes";
+
   const summarize = async () => {
     setError(""); setLoading(true); setSaved(false);
     try {
-      const sys = `你是专业学习笔记助手。根据这次学习/会议的内容，生成【简明扼要、只抓重点】的中文笔记。要求：\n第一行输出 "标题：" 加一个不超过15字的标题，概括学习内容主题。\n然后空一行，正文用精炼的分条要点（每条一句话），只保留最关键的知识点和结论，去掉所有冗余和客套，难点用★标注。不要长段落。`;
-      const result = await callClaude(text, sys);
+      const result = await callClaude(text, NOTE_SYS[kind]);
       setNotes(result);
-
-      // parse a title from the first line, then save to the Study Notes store
-      const firstLine = result.split("\n").find(l => l.trim()) || "";
-      let title = firstLine.replace(/^[#\s]*标题[:：]?\s*/, "").replace(/^[#\s]+/, "").trim();
-      if (!title) title = "学习笔记";
-      title = title.slice(0, 20);
-      const body = result.replace(/^.*标题[:：].*\n/, "").trim() || result;
-      addNote({
-        id: Date.now() + "-" + Math.random().toString(36).slice(2, 7),
-        title,
-        date: new Date().toISOString(),
-        content: body,
-      });
+      const { title, body } = parseTitle(result, isMeeting ? "会议记录" : "学习笔记");
+      addNote(kind, { id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), title, date: new Date().toISOString(), content: body });
       setSaved(true);
     } catch (e) { setError("Failed: " + e.message); }
     setLoading(false);
@@ -309,16 +315,111 @@ function SummarizeNotes({ text, glow, gradient }) {
   const download = () => {
     const blob = new Blob([notes], { type: "text/plain;charset=utf-8" });
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-    a.download = `notes_${new Date().toLocaleDateString("en-CA")}.txt`; a.click();
+    a.download = `${isMeeting ? "minutes" : "notes"}_${new Date().toLocaleDateString("en-CA")}.txt`; a.click();
   };
 
   return (
     <div style={{ marginTop: 16 }}>
-      <ActionBtn onClick={summarize} loading={loading} disabled={false} gradient={gradient}>📝 Summarize into notes</ActionBtn>
-      {saved && <div style={{ marginTop: 10, color: "#34d399", fontSize: 12 }}>✓ 已保存到 Study Notes</div>}
+      <ActionBtn onClick={summarize} loading={loading} disabled={false} gradient={gradient}>{btnLabel}</ActionBtn>
+      {saved && <div style={{ marginTop: 10, color: "#34d399", fontSize: 12 }}>✓ 已保存到 {savedTo}</div>}
       {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
-      {notes && <ResultBox content={notes} label="📝 Study Notes" accent={glow} onDownload={download} />}
+      {notes && <ResultBox content={notes} label={resultLabel} accent={glow} onDownload={download} />}
     </div>
+  );
+}
+
+// reusable notes-library page body (Study Notes / Meeting Minutes share this)
+function NotesLibrary({ feature, kind }) {
+  const isMeeting = kind === "meeting";
+  const [tab, setTab] = useState("saved");
+  const [notes, setNotes] = useState(loadNotes(kind));
+  const [openId, setOpenId] = useState(null);
+
+  useEffect(() => {
+    const refresh = () => setNotes(loadNotes(kind));
+    window.addEventListener(storeEvent(kind), refresh);
+    window.addEventListener("focus", refresh);
+    return () => { window.removeEventListener(storeEvent(kind), refresh); window.removeEventListener("focus", refresh); };
+  }, [kind]);
+
+  const del = (id) => { removeNote(kind, id); setNotes(loadNotes(kind)); if (openId === id) setOpenId(null); };
+  const fmtDate = (iso) => { try { return new Date(iso).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }); } catch { return ""; } };
+
+  const [input, setInput] = useState("");
+  const [output, setOutput] = useState("");
+  const [processing, setProcessing] = useState(false);
+  const [error, setError] = useState("");
+
+  const run = async () => {
+    if (!input.trim()) return;
+    setError(""); setProcessing(true);
+    try {
+      const result = await callClaude(input, NOTE_SYS[kind]);
+      setOutput(result);
+      const { title, body } = parseTitle(result, isMeeting ? "会议记录" : "学习笔记");
+      addNote(kind, { id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), title, date: new Date().toISOString(), content: body });
+      setNotes(loadNotes(kind));
+    } catch (e) { setError("Generation failed: " + e.message); }
+    setProcessing(false);
+  };
+
+  const downloadNote = (n) => {
+    const blob = new Blob([`${n.title}\n${fmtDate(n.date)}\n\n${n.content}`], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = `${n.title}.txt`; a.click();
+  };
+
+  const savedLabel = isMeeting ? "会议记录" : "笔记";
+  const emptyHint = isMeeting
+    ? "还没有会议记录。在 Live Translate 里翻译会议后点「📝 Summarize meeting minutes」，会自动保存到这里。"
+    : "还没有笔记。在 Video / Live Translate 里翻译后点「📝 Summarize into notes」，会自动保存到这里。";
+
+  return (
+    <>
+      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+        {[{ v: "saved", l: `📁 ${isMeeting ? "My minutes" : "My notes"} (${notes.length})` }, { v: "create", l: "✏️ New" }].map(t => (
+          <button key={t.v} onClick={() => setTab(t.v)} style={{ ...glass({ borderRadius: 12 }), padding: "8px 18px", fontSize: 13, cursor: "pointer", background: tab === t.v ? `${feature.glow}33` : "rgba(255,255,255,0.045)", borderColor: tab === t.v ? feature.glow : "rgba(255,255,255,0.09)", color: tab === t.v ? feature.glow : "#94a3b8", fontWeight: 600 }}>{t.l}</button>
+        ))}
+      </div>
+
+      {tab === "saved" ? (
+        notes.length === 0 ? (
+          <div style={{ ...glass({ borderRadius: 14 }), padding: "40px 20px", textAlign: "center", color: "#64748b", fontSize: 13, lineHeight: 1.8 }}>{emptyHint}</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {notes.map(n => (
+              <div key={n.id} style={{ ...glass({ borderRadius: 14, borderColor: openId === n.id ? `${feature.glow}55` : "rgba(255,255,255,0.09)" }), overflow: "hidden" }}>
+                <div onClick={() => setOpenId(openId === n.id ? null : n.id)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 16px", cursor: "pointer" }}>
+                  <div style={{ width: 36, height: 36, borderRadius: 10, background: feature.gradient, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}>{isMeeting ? "📋" : "📄"}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: "#f1f5f9", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{n.title}</div>
+                    <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{fmtDate(n.date)}</div>
+                  </div>
+                  <span style={{ color: "#64748b", fontSize: 13 }}>{openId === n.id ? "▲" : "▼"}</span>
+                </div>
+                {openId === n.id && (
+                  <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)" }}>
+                    <pre style={{ margin: 0, padding: 16, color: "#cbd5e1", fontSize: 14, lineHeight: 1.8, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "system-ui" }}>{n.content}</pre>
+                    <div style={{ display: "flex", gap: 8, padding: "0 16px 14px" }}>
+                      <button onClick={() => navigator.clipboard.writeText(n.content)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>Copy</button>
+                      <button onClick={() => downloadNote(n)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>↓ Download</button>
+                      <button onClick={() => del(n.id)} style={{ background: "none", border: "1px solid #fb718544", color: "#fb7185", borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>Delete</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )
+      ) : (
+        <>
+          <TextInput value={input} onChange={setInput} label={isMeeting ? "粘贴会议内容（日文/中文）" : "粘贴学习内容（字幕、教材、课堂记录…）"} placeholder={isMeeting ? "Paste meeting content..." : "Paste study content..."} accent={feature.glow} rows={7} />
+          <ActionBtn onClick={run} loading={processing} disabled={!input.trim()} gradient={feature.gradient}>{isMeeting ? "📋 Generate & save" : "📚 Generate & save"}</ActionBtn>
+          {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
+          {output && <ResultBox content={output} label={`${isMeeting ? "📋 Meeting Minutes" : "📚 Study Notes"}（已保存）`} accent={feature.glow} />}
+        </>
+      )}
+    </>
   );
 }
 
@@ -516,7 +617,7 @@ function TranslatePage({ feature, onBack }) {
           )}
 
           <LiveFeed segments={segments} fullText={fullText} glow={feature.glow} label={`Live translation → ${targetLabel}`} onDownload={download} onClear={!listening ? reset : undefined} />
-          {!listening && <SummarizeNotes text={fullText} glow={feature.glow} gradient={feature.gradient} />}
+          {!listening && <SummarizeBlock text={fullText} glow={feature.glow} gradient={feature.gradient} kind="meeting" />}
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
         </>
       ) : (
@@ -534,48 +635,9 @@ function TranslatePage({ feature, onBack }) {
 }
 
 function MeetingNotesPage({ feature, onBack }) {
-  const [accumulated, setAccumulated] = useState("");
-  const [interim, setInterim] = useState("");
-  const [notes, setNotes] = useState("");
-  const [processing, setProcessing] = useState(false);
-  const [tab, setTab] = useState("mic");
-  const [manualInput, setManualInput] = useState("");
-  const [error, setError] = useState("");
-
-  const { listening, supported, start, stop } = useSpeechRecognition({
-    lang: "ja-JP",
-    onResult: ({ interim, accumulated }) => { setInterim(interim); setAccumulated(accumulated); },
-    onEnd: () => {},
-  });
-
-  const generate = async (text) => {
-    if (!text.trim()) return;
-    setError(""); setProcessing(true);
-    try {
-      const sys = `You are a professional meeting secretary. Generate structured English meeting minutes from the content:\n【Topic】\n【Participants】(if mentioned)\n【Key Points】(bulleted)\n【Decisions】\n【Action Items】(with owner & due date)\n【Follow-ups】\nBe concise and highlight key decisions and action items.`;
-      const result = await callClaude(`Meeting content:\n${text}`, sys);
-      setNotes(result);
-    } catch (e) { setError("Generation failed: " + e.message); }
-    setProcessing(false);
-  };
-
-  const download = () => {
-    const blob = new Blob([notes], { type: "text/plain;charset=utf-8" });
-    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-    a.download = `meeting_notes_${new Date().toLocaleDateString("en-CA")}.txt`; a.click();
-  };
-
-  const src = tab === "mic" ? accumulated : manualInput;
   return (
     <PageShell feature={feature} onBack={onBack}>
-      <TabSwitch tab={tab} setTab={setTab} glow={feature.glow} />
-      {tab === "mic"
-        ? <MicSection listening={listening} supported={supported} start={start} stop={stop} glow={feature.glow} accumulated={accumulated} interim={interim} label="Record to capture the whole meeting" />
-        : <TextInput value={manualInput} onChange={setManualInput} label="Paste meeting content" accent={feature.glow} placeholder={`Tanaka: Let's discuss the Q3 goals...\nLi: We need more marketing budget...\nDecision: submit the proposal next Friday...`} rows={7} />
-      }
-      <ActionBtn onClick={() => generate(src)} loading={processing} disabled={!src.trim()} gradient={feature.gradient}>📋 Generate Minutes</ActionBtn>
-      {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
-      {notes && <ResultBox content={notes} label="📋 Meeting Minutes" accent={feature.glow} onDownload={download} />}
+      <NotesLibrary feature={feature} kind="meeting" />
     </PageShell>
   );
 }
@@ -645,7 +707,7 @@ function VideoTranslatePage({ feature, onBack }) {
           <ActionBtn onClick={() => translate(transcript)} loading={processing} disabled={!transcript.trim()} gradient={feature.gradient}>🌏 Translate to Chinese</ActionBtn>
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
           {output && <ResultBox content={output} label="🌏 Chinese Translation" accent={feature.glow} onDownload={download} />}
-          <SummarizeNotes text={output || transcript} glow={feature.glow} gradient={feature.gradient} />
+          <SummarizeBlock text={output || transcript} glow={feature.glow} gradient={feature.gradient} kind="study" />
         </>
       ) : (
         <>
@@ -668,7 +730,7 @@ function VideoTranslatePage({ feature, onBack }) {
             💡 For videos without a transcript. Best on desktop Chrome; play the audio out loud near the mic.
           </div>
           <LiveFeed segments={segments} fullText={fullText} glow={feature.glow} label="🌏 Live translation → Chinese" onDownload={download} onClear={!listening ? reset : undefined} />
-          {!listening && <SummarizeNotes text={fullText} glow={feature.glow} gradient={feature.gradient} />}
+          {!listening && <SummarizeBlock text={fullText} glow={feature.glow} gradient={feature.gradient} kind="study" />}
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
         </>
       )}
@@ -677,96 +739,9 @@ function VideoTranslatePage({ feature, onBack }) {
 }
 
 function StudyNotesPage({ feature, onBack }) {
-  const [tab, setTab] = useState("saved"); // "saved" | "create"
-  const [notes, setNotes] = useState(loadNotes());
-  const [openId, setOpenId] = useState(null);
-
-  // keep in sync if notes are added from another page while this is mounted
-  useEffect(() => {
-    const refresh = () => setNotes(loadNotes());
-    window.addEventListener("studynotes-changed", refresh);
-    window.addEventListener("focus", refresh);
-    return () => { window.removeEventListener("studynotes-changed", refresh); window.removeEventListener("focus", refresh); };
-  }, []);
-
-  const del = (id) => { removeNote(id); setNotes(loadNotes()); if (openId === id) setOpenId(null); };
-  const fmtDate = (iso) => { try { return new Date(iso).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }); } catch { return ""; } };
-
-  // ── manual create ──
-  const [input, setInput] = useState("");
-  const [output, setOutput] = useState("");
-  const [processing, setProcessing] = useState(false);
-  const [error, setError] = useState("");
-
-  const run = async () => {
-    if (!input.trim()) return;
-    setError(""); setProcessing(true);
-    try {
-      const sys = `你是专业学习笔记助手。根据内容生成【简明扼要、只抓重点】的中文笔记。第一行输出 "标题：" 加不超过15字的标题，空一行后用精炼的分条要点（每条一句话），难点用★标注，去掉冗余。`;
-      const result = await callClaude(input, sys);
-      setOutput(result);
-      const firstLine = result.split("\n").find(l => l.trim()) || "";
-      let title = firstLine.replace(/^[#\s]*标题[:：]?\s*/, "").replace(/^[#\s]+/, "").trim().slice(0, 20) || "学习笔记";
-      const body = result.replace(/^.*标题[:：].*\n/, "").trim() || result;
-      addNote({ id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), title, date: new Date().toISOString(), content: body });
-      setNotes(loadNotes());
-    } catch (e) { setError("Generation failed: " + e.message); }
-    setProcessing(false);
-  };
-
-  const downloadNote = (n) => {
-    const blob = new Blob([`${n.title}\n${fmtDate(n.date)}\n\n${n.content}`], { type: "text/plain;charset=utf-8" });
-    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-    a.download = `${n.title}.txt`; a.click();
-  };
-
   return (
     <PageShell feature={feature} onBack={onBack}>
-      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
-        {[{ v: "saved", l: `📁 My notes (${notes.length})` }, { v: "create", l: "✏️ New note" }].map(t => (
-          <button key={t.v} onClick={() => setTab(t.v)} style={{ ...glass({ borderRadius: 12 }), padding: "8px 18px", fontSize: 13, cursor: "pointer", background: tab === t.v ? `${feature.glow}33` : "rgba(255,255,255,0.045)", borderColor: tab === t.v ? feature.glow : "rgba(255,255,255,0.09)", color: tab === t.v ? feature.glow : "#94a3b8", fontWeight: 600 }}>{t.l}</button>
-        ))}
-      </div>
-
-      {tab === "saved" ? (
-        notes.length === 0 ? (
-          <div style={{ ...glass({ borderRadius: 14 }), padding: "40px 20px", textAlign: "center", color: "#64748b", fontSize: 13 }}>
-            还没有笔记。<br />在 Live Translate / Video 里翻译后点「📝 Summarize into notes」，会自动保存到这里。
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {notes.map(n => (
-              <div key={n.id} style={{ ...glass({ borderRadius: 14, borderColor: openId === n.id ? `${feature.glow}55` : "rgba(255,255,255,0.09)" }), overflow: "hidden" }}>
-                <div onClick={() => setOpenId(openId === n.id ? null : n.id)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 16px", cursor: "pointer" }}>
-                  <div style={{ width: 36, height: 36, borderRadius: 10, background: feature.gradient, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}>📄</div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: "#f1f5f9", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{n.title}</div>
-                    <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{fmtDate(n.date)}</div>
-                  </div>
-                  <span style={{ color: "#64748b", fontSize: 13 }}>{openId === n.id ? "▲" : "▼"}</span>
-                </div>
-                {openId === n.id && (
-                  <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)" }}>
-                    <pre style={{ margin: 0, padding: 16, color: "#cbd5e1", fontSize: 14, lineHeight: 1.8, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "system-ui" }}>{n.content}</pre>
-                    <div style={{ display: "flex", gap: 8, padding: "0 16px 14px" }}>
-                      <button onClick={() => navigator.clipboard.writeText(n.content)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>Copy</button>
-                      <button onClick={() => downloadNote(n)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>↓ Download</button>
-                      <button onClick={() => del(n.id)} style={{ background: "none", border: "1px solid #fb718544", color: "#fb7185", borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>Delete</button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        )
-      ) : (
-        <>
-          <TextInput value={input} onChange={setInput} label="粘贴学习内容（字幕、教材、课堂记录…）" placeholder="Paste study content..." accent={feature.glow} rows={7} />
-          <ActionBtn onClick={run} loading={processing} disabled={!input.trim()} gradient={feature.gradient}>📚 Generate & save</ActionBtn>
-          {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
-          {output && <ResultBox content={output} label="📚 Study Notes（已保存）" accent={feature.glow} />}
-        </>
-      )}
+      <NotesLibrary feature={feature} kind="study" />
     </PageShell>
   );
 }
