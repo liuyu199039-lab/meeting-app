@@ -369,18 +369,52 @@ function NotesLibrary({ feature, kind }) {
     a.download = `${n.title}.txt`; a.click();
   };
 
-  const savedLabel = isMeeting ? "会议记录" : "笔记";
+  // full backup of this library as a JSON file
+  const fileRef = useRef(null);
+  const exportAll = () => {
+    const blob = new Blob([JSON.stringify(loadNotes(kind), null, 2)], { type: "application/json" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = `${kind}_backup_${new Date().toLocaleDateString("en-CA")}.json`; a.click();
+  };
+  const importAll = (file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const imported = JSON.parse(reader.result);
+        if (!Array.isArray(imported)) return;
+        const existing = loadNotes(kind);
+        const ids = new Set(existing.map(n => n.id));
+        const merged = [...imported.filter(n => n && n.id && !ids.has(n.id)), ...existing];
+        merged.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+        saveNotesList(kind, merged);
+        setNotes(loadNotes(kind));
+        alert(`已导入，当前共 ${merged.length} 条`);
+      } catch { alert("导入失败：文件格式不对"); }
+    };
+    reader.readAsText(file);
+  };
+
   const emptyHint = isMeeting
     ? "还没有会议记录。在 Live Translate 里翻译会议后点「📝 Summarize meeting minutes」，会自动保存到这里。"
     : "还没有笔记。在 Video / Live Translate 里翻译后点「📝 Summarize into notes」，会自动保存到这里。";
+  const toolBtn = { ...glass({ borderRadius: 8 }), padding: "5px 10px", fontSize: 11, color: "#94a3b8", cursor: "pointer" };
 
   return (
     <>
-      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
         {[{ v: "saved", l: `📁 ${isMeeting ? "My minutes" : "My notes"} (${notes.length})` }, { v: "create", l: "✏️ New" }].map(t => (
           <button key={t.v} onClick={() => setTab(t.v)} style={{ ...glass({ borderRadius: 12 }), padding: "8px 18px", fontSize: 13, cursor: "pointer", background: tab === t.v ? `${feature.glow}33` : "rgba(255,255,255,0.045)", borderColor: tab === t.v ? feature.glow : "rgba(255,255,255,0.09)", color: tab === t.v ? feature.glow : "#94a3b8", fontWeight: 600 }}>{t.l}</button>
         ))}
       </div>
+
+      {tab === "saved" && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          <button onClick={exportAll} style={toolBtn} disabled={!notes.length}>⬆ Export all (backup)</button>
+          <button onClick={() => fileRef.current?.click()} style={toolBtn}>⬇ Import</button>
+          <input ref={fileRef} type="file" accept="application/json,.json" style={{ display: "none" }} onChange={e => { importAll(e.target.files[0]); e.target.value = ""; }} />
+        </div>
+      )}
 
       {tab === "saved" ? (
         notes.length === 0 ? (
@@ -875,6 +909,9 @@ export default function App() {
   const [current, setCurrent] = useState(null);
   const feature = FEATURES.find(f => f.id === current);
   const back = () => setCurrent(null);
+
+  // ask the browser to keep our localStorage from being auto-evicted
+  useEffect(() => { try { navigator.storage?.persist?.(); } catch {} }, []);
 
   let page;
   if (!current) page = <HomeScreen onSelect={setCurrent} />;
