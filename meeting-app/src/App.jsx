@@ -355,6 +355,8 @@ function useRollingTranslate(sys, { debounce = 3500, maxChars = 140 } = {}) {
 // Notta-style transcript feed: timestamp + speaker + original (top) + translation (below).
 function LiveFeed({ segments, interim, glow, label, onClear }) {
   const btn = { background: "none", border: `1px solid ${glow}44`, color: glow, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer" };
+  const [speaker, setSpeaker] = useState("话者 1");
+  const [editing, setEditing] = useState(false);
   if (!segments.length && !interim) return null;
 
   const t0 = segments.length ? segments[0].at : Date.now();
@@ -362,7 +364,8 @@ function LiveFeed({ segments, interim, glow, label, onClear }) {
     const s = Math.max(0, Math.floor((at - t0) / 1000));
     return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
   };
-  const transcript = segments.map(s => `[${fmt(s.at)}] ${s.src}\n${s.tr}`).join("\n\n");
+  const name = speaker.trim() || "话者 1";
+  const transcript = segments.map(s => `[${fmt(s.at)}] ${name}\n${s.src}\n${s.tr}`).join("\n\n");
   const download = () => {
     const blob = new Blob([transcript], { type: "text/plain;charset=utf-8" });
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
@@ -375,7 +378,7 @@ function LiveFeed({ segments, interim, glow, label, onClear }) {
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
           <span style={{ width: 16, height: 16, borderRadius: "50%", background: glow, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9 }}>🗣</span>
-          <span style={{ fontSize: 12, color: "#94a3b8", fontWeight: 600 }}>话者 1</span>
+          <span style={{ fontSize: 12, color: "#94a3b8", fontWeight: 600 }}>{name}</span>
           {live && <span style={{ fontSize: 10, color: glow }}>● 识别中</span>}
         </div>
         <div style={{ fontSize: 15, color: live ? "#94a3b8" : "#f1f5f9", lineHeight: 1.6 }}>{src}{live && <span style={{ color: "#475569" }}>…</span>}</div>
@@ -386,8 +389,16 @@ function LiveFeed({ segments, interim, glow, label, onClear }) {
 
   return (
     <div style={{ ...glass({ borderColor: `${glow}44` }), marginTop: 16, overflow: "hidden", boxShadow: `0 0 30px ${glow}22` }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: `${glow}18`, borderBottom: `1px solid ${glow}22` }}>
-        <span style={{ fontSize: 12, color: glow, fontWeight: 700 }}>{label}</span>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: `${glow}18`, borderBottom: `1px solid ${glow}22`, flexWrap: "wrap", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 12, color: glow, fontWeight: 700 }}>{label}</span>
+          {editing ? (
+            <input autoFocus value={speaker} onChange={e => setSpeaker(e.target.value)} onBlur={() => setEditing(false)} onKeyDown={e => e.key === "Enter" && setEditing(false)}
+              style={{ ...glass({ borderRadius: 6 }), width: 96, padding: "2px 8px", color: "#f1f5f9", fontSize: 12, outline: "none" }} />
+          ) : (
+            <button onClick={() => setEditing(true)} style={{ ...btn, borderColor: "rgba(255,255,255,0.15)", color: "#94a3b8" }}>🗣 {name} ✎</button>
+          )}
+        </div>
         <div style={{ display: "flex", gap: 8 }}>
           {transcript && <button onClick={download} style={btn}>↓ Download</button>}
           {transcript && <button onClick={() => navigator.clipboard.writeText(transcript)} style={btn}>Copy all</button>}
