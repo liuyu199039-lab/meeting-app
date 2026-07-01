@@ -202,6 +202,96 @@ function useSpeechRecognition({ lang, onResult, onEnd }) {
   return { listening, supported, start, stop };
 }
 
+// ── useOpenAIRealtimeSTT ─────────────────────────────────────
+// Pro engine: streams mic audio to OpenAI's Realtime transcription API over
+// WebRTC (browser ↔ OpenAI direct, token minted by our backend). Gives real-time
+// transcription deltas + per-utterance completed transcripts. Same interface as
+// useSpeechRecognition. start() is async and throws if it can't connect.
+function useOpenAIRealtimeSTT({ language, onResult, onEnd }) {
+  const [listening, setListening] = useState(false);
+  const supported = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia
+    && typeof window !== "undefined" && !!window.RTCPeerConnection;
+
+  const accRef = useRef("");
+  const interimRef = useRef("");
+  const pcRef = useRef(null), dcRef = useRef(null), streamRef = useRef(null);
+  const onResultRef = useRef(onResult); onResultRef.current = onResult;
+  const onEndRef = useRef(onEnd); onEndRef.current = onEnd;
+
+  const cleanup = useCallback(() => {
+    try { dcRef.current?.close(); } catch {}
+    try { pcRef.current?.getSenders()?.forEach(s => s.track?.stop()); } catch {}
+    try { pcRef.current?.close(); } catch {}
+    try { streamRef.current?.getTracks().forEach(t => t.stop()); } catch {}
+    dcRef.current = null; pcRef.current = null; streamRef.current = null;
+  }, []);
+
+  const start = useCallback(async () => {
+    accRef.current = ""; interimRef.current = "";
+    // 1. ephemeral token
+    const tr = await fetch("/api/openai-realtime-token", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ language }),
+    });
+    const tj = await tr.json();
+    if (tj.error || !tj.token) throw new Error(tj.error || "no token");
+
+    // 2. WebRTC peer + mic track + data channel
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+    streamRef.current = stream;
+    const pc = new RTCPeerConnection();
+    pcRef.current = pc;
+    pc.addTrack(stream.getAudioTracks()[0], stream);
+    const dc = pc.createDataChannel("oai-events");
+    dcRef.current = dc;
+    dc.onmessage = (e) => {
+      let m; try { m = JSON.parse(e.data); } catch { return; }
+      if (m.type === "conversation.item.input_audio_transcription.delta") {
+        interimRef.current += m.delta || "";
+        onResultRef.current({ interim: interimRef.current, accumulated: accRef.current, finalChunk: "" });
+      } else if (m.type === "conversation.item.input_audio_transcription.completed") {
+        const t = (m.transcript || "").trim();
+        interimRef.current = "";
+        if (t) {
+          accRef.current += (accRef.current ? " " : "") + t;
+          onResultRef.current({ interim: "", accumulated: accRef.current, finalChunk: t });
+        }
+      }
+    };
+
+    // 3. SDP offer/answer with OpenAI
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    const sdpRes = await fetch("https://api.openai.com/v1/realtime/calls", {
+      method: "POST", body: offer.sdp,
+      headers: { Authorization: "Bearer " + tj.token, "Content-Type": "application/sdp" },
+    });
+    if (!sdpRes.ok) { const t = await sdpRes.text().catch(() => ""); throw new Error(`SDP ${sdpRes.status}: ${t.slice(0, 150)}`); }
+    await pc.setRemoteDescription({ type: "answer", sdp: await sdpRes.text() });
+    setListening(true);
+  }, [language]);
+
+  const stop = useCallback(() => {
+    cleanup(); setListening(false);
+    onEndRef.current?.(accRef.current);
+  }, [cleanup]);
+
+  useEffect(() => () => cleanup(), [cleanup]);
+  return { listening, supported, start, stop };
+}
+
+// engine picker: Free (browser Google) vs Pro (OpenAI realtime)
+function EngineToggle({ engine, setEngine, glow, disabled }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+      <span style={{ fontSize: 11, color: "#64748b" }}>识别引擎:</span>
+      {[{ v: "free", l: "Free (Google)" }, { v: "pro", l: "⚡ Pro (OpenAI实时)" }].map(t => (
+        <button key={t.v} onClick={() => !disabled && setEngine(t.v)} disabled={disabled} style={{ ...glass({ borderRadius: 999 }), padding: "5px 12px", fontSize: 12, cursor: disabled ? "not-allowed" : "pointer", background: engine === t.v ? `${glow}33` : "rgba(255,255,255,0.045)", borderColor: engine === t.v ? glow : "rgba(255,255,255,0.09)", color: engine === t.v ? glow : "#94a3b8", fontWeight: 600 }}>{t.l}</button>
+      ))}
+    </div>
+  );
+}
+
 // ── useRollingTranslate ──────────────────────────────────────
 // Buffers recognized chunks and auto-translates them a paragraph at a time:
 // it waits until either ~maxChars of text has piled up, or a longer pause
@@ -628,14 +718,22 @@ function TranslatePage({ feature, onBack }) {
   const [error, setError] = useState("");
 
   const { segments, pendingText, onFinal, flush, reset, fullText } = useRollingTranslate(sys);
-  const { listening, supported, start, stop } = useSpeechRecognition({
-    lang: "ja-JP",
-    onResult: ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); },
-    onEnd: () => flush(),
-  });
+  const [engine, setEngine] = useState("free"); // "free" = Google, "pro" = OpenAI realtime
+  const handleResult = ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); };
+  const rt = useOpenAIRealtimeSTT({ language: "ja", onResult: handleResult, onEnd: () => flush() });
+  const sr = useSpeechRecognition({ lang: "ja-JP", onResult: handleResult, onEnd: () => flush() });
+  const active = engine === "pro" ? rt : sr;
+  const { listening, supported, stop } = active;
 
   // keep prior transcripts across mic sessions — only clear interim/error
-  const startLive = () => { setInterim(""); setError(""); start(); };
+  const startLive = async () => {
+    setInterim(""); setError("");
+    if (engine === "pro") {
+      try { await rt.start(); return; }
+      catch (e) { setEngine("free"); setError("Pro(OpenAI)启动失败：" + e.message + "，已切到 Free。"); try { sr.start(); } catch {} return; }
+    }
+    try { sr.start(); } catch {}
+  };
 
   const translateManual = async (text) => {
     setError(""); setTranslating(true);
@@ -651,6 +749,7 @@ function TranslatePage({ feature, onBack }) {
       <TabSwitch tab={tab} setTab={setTab} glow={feature.glow} />
       {tab === "mic" ? (
         <>
+          <EngineToggle engine={engine} setEngine={setEngine} glow={feature.glow} disabled={listening} />
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 16, padding: "24px 0" }}>
             <MicButton listening={listening} onStart={startLive} onStop={stop} glow={feature.glow} disabled={!supported} />
             <Waveform active={listening} glow={feature.glow} />
@@ -699,13 +798,21 @@ function VideoTranslatePage({ feature, onBack }) {
 
   // mic mode → live rolling translation (English chunk → Chinese)
   const { segments, pendingText, onFinal, flush, reset, fullText } = useRollingTranslate(ZH_SYS);
-  const { listening, supported, start, stop } = useSpeechRecognition({
-    lang: "en-US",
-    onResult: ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); },
-    onEnd: () => flush(),
-  });
+  const [engine, setEngine] = useState("free");
+  const handleResult = ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); };
+  const rt = useOpenAIRealtimeSTT({ language: "en", onResult: handleResult, onEnd: () => flush() });
+  const sr = useSpeechRecognition({ lang: "en-US", onResult: handleResult, onEnd: () => flush() });
+  const active = engine === "pro" ? rt : sr;
+  const { listening, supported, stop } = active;
   // keep prior transcripts across mic sessions — only clear interim/error
-  const startLive = () => { setInterim(""); setError(""); start(); };
+  const startLive = async () => {
+    setInterim(""); setError("");
+    if (engine === "pro") {
+      try { await rt.start(); return; }
+      catch (e) { setEngine("free"); setError("Pro(OpenAI)启动失败：" + e.message + "，已切到 Free。"); try { sr.start(); } catch {} return; }
+    }
+    try { sr.start(); } catch {}
+  };
 
   // transcript mode → translate the whole pasted text at once
   const translate = async (text) => {
