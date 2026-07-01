@@ -441,7 +441,7 @@ function useRollingTranslate(sys, { debounce = 3500, maxChars = 140 } = {}) {
     const src = text.trim();
     if (!src) return;
     const id = Date.now() + Math.random();
-    setSegments(s => [...s, { id, src, tr: "", pending: true }]);
+    setSegments(s => [...s, { id, src, tr: "", pending: true, at: Date.now() }]);
     try {
       const result = await callClaude(src, sysRef.current);
       setSegments(s => s.map(seg => seg.id === id ? { ...seg, tr: result, pending: false } : seg));
@@ -481,29 +481,51 @@ function useRollingTranslate(sys, { debounce = 3500, maxChars = 140 } = {}) {
   return { segments, onFinal, flush, reset, fullText };
 }
 
-// reusable live-translation feed UI
-function LiveFeed({ segments, fullText, glow, label, onDownload, onClear }) {
+// Notta-style transcript feed: timestamp + speaker + original (top) + translation (below).
+function LiveFeed({ segments, interim, glow, label, onClear }) {
   const btn = { background: "none", border: `1px solid ${glow}44`, color: glow, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer" };
-  if (!segments.length) return null;
+  if (!segments.length && !interim) return null;
+
+  const t0 = segments.length ? segments[0].at : Date.now();
+  const fmt = (at) => {
+    const s = Math.max(0, Math.floor((at - t0) / 1000));
+    return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+  };
+  const transcript = segments.map(s => `[${fmt(s.at)}] ${s.src}\n${s.tr}`).join("\n\n");
+  const download = () => {
+    const blob = new Blob([transcript], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = `transcript_${new Date().toLocaleDateString("en-CA")}.txt`; a.click();
+  };
+
+  const Row = ({ ts, src, tr, pending, live }) => (
+    <div style={{ display: "flex", gap: 12, padding: "14px 16px", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+      <div style={{ width: 44, flexShrink: 0, fontSize: 11, color: "#64748b", paddingTop: 2 }}>{ts}</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+          <span style={{ width: 16, height: 16, borderRadius: "50%", background: glow, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9 }}>🗣</span>
+          <span style={{ fontSize: 12, color: "#94a3b8", fontWeight: 600 }}>话者 1</span>
+          {live && <span style={{ fontSize: 10, color: glow }}>● 识别中</span>}
+        </div>
+        <div style={{ fontSize: 15, color: live ? "#94a3b8" : "#f1f5f9", lineHeight: 1.6 }}>{src}{live && <span style={{ color: "#475569" }}>…</span>}</div>
+        {!live && <div style={{ fontSize: 14, color: pending ? "#64748b" : "#a5b4fc", lineHeight: 1.6, marginTop: 4 }}>{pending ? "翻译中…" : tr}</div>}
+      </div>
+    </div>
+  );
+
   return (
     <div style={{ ...glass({ borderColor: `${glow}44` }), marginTop: 16, overflow: "hidden", boxShadow: `0 0 30px ${glow}22` }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: `${glow}18`, borderBottom: `1px solid ${glow}22` }}>
         <span style={{ fontSize: 12, color: glow, fontWeight: 700 }}>{label}</span>
         <div style={{ display: "flex", gap: 8 }}>
-          {fullText && onDownload && <button onClick={() => onDownload(fullText)} style={btn}>↓ Download</button>}
-          {fullText && <button onClick={() => navigator.clipboard.writeText(fullText)} style={btn}>Copy all</button>}
+          {transcript && <button onClick={download} style={btn}>↓ Download</button>}
+          {transcript && <button onClick={() => navigator.clipboard.writeText(transcript)} style={btn}>Copy all</button>}
           {onClear && <button onClick={onClear} style={{ ...btn, color: "#fb7185", borderColor: "#fb718544" }}>Clear</button>}
         </div>
       </div>
-      <div style={{ maxHeight: 360, overflowY: "auto", padding: "4px 0" }}>
-        {segments.map(seg => (
-          <div key={seg.id} style={{ padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-            <div style={{ fontSize: 11, color: "#475569", marginBottom: 3 }}>{seg.src}</div>
-            <div style={{ fontSize: 15, color: seg.pending ? "#64748b" : "#e2e8f0", lineHeight: 1.6 }}>
-              {seg.pending ? "⏳ translating…" : seg.tr}
-            </div>
-          </div>
-        ))}
+      <div style={{ maxHeight: 420, overflowY: "auto" }}>
+        {segments.map(seg => <Row key={seg.id} ts={fmt(seg.at)} src={seg.src} tr={seg.tr} pending={seg.pending} />)}
+        {interim && <Row ts={fmt(Date.now())} src={interim} live />}
       </div>
     </div>
   );
@@ -885,18 +907,10 @@ function TranslatePage({ feature, onBack }) {
                 : listening ? "🔴 Live translating... keep talking, tap to stop"
                 : "Tap once — it translates as you speak, no need to hold"}
             </div>
-            {engine === "pro" && listening && status && <div style={{ fontSize: 12, color: "#64748b" }}>{status}</div>}
+            {engine === "pro" && listening && (status || !segments.length) && <div style={{ fontSize: 12, color: "#64748b" }}>{status || "OpenAI 模式：说一段后停顿，转写好会出现在下方"}</div>}
           </div>
 
-          {/* live recognized text (current line being heard) */}
-          {(interim || (listening && !segments.length)) && (
-            <div style={{ ...glass({ borderRadius: 14 }), padding: 12, marginBottom: 14 }}>
-              <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>Listening</div>
-              <div style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.6 }}>{interim || (engine === "pro" ? "OpenAI 模式：说一句后停顿一下，识别中会显示在下方" : "…")}</div>
-            </div>
-          )}
-
-          <LiveFeed segments={segments} fullText={fullText} glow={feature.glow} label={`Live translation → ${targetLabel}`} onDownload={download} onClear={!listening ? reset : undefined} />
+          <LiveFeed segments={segments} interim={interim} glow={feature.glow} label={`实时翻译 → ${targetLabel}`} onClear={!listening ? reset : undefined} />
           {!listening && <SummarizeBlock text={fullText} glow={feature.glow} gradient={feature.gradient} kind="meeting" />}
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
         </>
@@ -1009,18 +1023,12 @@ function VideoTranslatePage({ feature, onBack }) {
                 : listening ? "🔴 Live translating... play the video, tap to stop"
                 : "Tap once — it transcribes & translates as the video plays"}
             </div>
-            {engine === "pro" && listening && status && <div style={{ fontSize: 12, color: "#64748b" }}>{status}</div>}
+            {engine === "pro" && listening && (status || !segments.length) && <div style={{ fontSize: 12, color: "#64748b" }}>{status || "OpenAI 模式：播放一段后停顿，转写好会出现在下方"}</div>}
           </div>
-          {(interim || (listening && !segments.length)) && (
-            <div style={{ ...glass({ borderRadius: 14 }), padding: 12, marginBottom: 14 }}>
-              <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>Listening</div>
-              <div style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.6 }}>{interim || (engine === "pro" ? "OpenAI 模式：说一句后停顿一下，识别中会显示在下方" : "…")}</div>
-            </div>
-          )}
           <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>
             💡 For videos without a transcript. Best on desktop Chrome; play the audio out loud near the mic.
           </div>
-          <LiveFeed segments={segments} fullText={fullText} glow={feature.glow} label="🌏 Live translation → Chinese" onDownload={download} onClear={!listening ? reset : undefined} />
+          <LiveFeed segments={segments} interim={interim} glow={feature.glow} label="🌏 实时翻译 → 中文" onClear={!listening ? reset : undefined} />
           {!listening && <SummarizeBlock text={fullText} glow={feature.glow} gradient={feature.gradient} kind="study" />}
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
         </>
