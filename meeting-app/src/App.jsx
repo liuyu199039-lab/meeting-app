@@ -102,9 +102,9 @@ const FEATURES = [
   },
   {
     id: "vocab",
-    icon: "🧠",
-    title: "AI Terms\nExplainer",
-    desc: "Understand AI concepts like MCP, Agent, RAG",
+    icon: "🗂️",
+    title: "Knowledge\nDigest",
+    desc: "汇总分类你的学习笔记",
     gradient: "linear-gradient(135deg, #06b6d4 0%, #67e8f9 100%)",
     glow: "#06b6d4",
     tag: "learning",
@@ -904,67 +904,81 @@ function StudyNotesPage({ feature, onBack }) {
   );
 }
 
-function VocabPage({ feature, onBack }) {
-  const [term, setTerm] = useState("");
+// Knowledge Digest — pulls all saved study notes (and optionally meeting minutes)
+// and asks the AI to distill + categorize them into an organized knowledge map.
+function KnowledgeDigestPage({ feature, onBack }) {
+  const [src, setSrc] = useState("study"); // "study" | "meeting" | "both"
   const [output, setOutput] = useState("");
-  const [activeTerm, setActiveTerm] = useState("");
   const [processing, setProcessing] = useState(false);
-  const [history, setHistory] = useState([]);
   const [error, setError] = useState("");
+  const [counts, setCounts] = useState({ study: 0, meeting: 0 });
 
-  const SUGGESTIONS = ["MCP", "Skill", "Agent", "RAG", "Token", "Embedding", "Fine-tuning", "Prompt", "Context window", "Hallucination"];
+  useEffect(() => {
+    const refresh = () => setCounts({ study: loadNotes("study").length, meeting: loadNotes("meeting").length });
+    refresh();
+    window.addEventListener("study-notes-changed", refresh);
+    window.addEventListener("meeting-notes-changed", refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      window.removeEventListener("study-notes-changed", refresh);
+      window.removeEventListener("meeting-notes-changed", refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, []);
 
-  const explain = async (q) => {
-    const query = (q ?? term).trim();
-    if (!query) return;
-    setError(""); setProcessing(true); setActiveTerm(query);
+  const gather = () => {
+    const kinds = src === "both" ? ["study", "meeting"] : [src];
+    return kinds.flatMap(k => loadNotes(k)).map(n => `【${n.title}】\n${n.content}`).join("\n\n---\n\n");
+  };
+  const available = (src === "both" ? counts.study + counts.meeting : counts[src]);
+
+  const organize = async () => {
+    const text = gather();
+    if (!text.trim()) { setError("还没有可整理的笔记。先去生成一些学习笔记/会议记录。"); return; }
+    setError(""); setProcessing(true);
     try {
-      const sys = `你是 AI 领域的科普讲解高手，擅长把专业概念讲得通俗易懂。用户给你一个 AI 相关的专业词汇或概念，请用简体中文严格按以下三段结构讲解：\n\n【是什么】先一句话定义，再用2-4句准确解释清楚它到底指什么、解决什么问题。\n\n【打个比方】用一个生活化的类比或形象的画面来讲解，让完全的外行也能秒懂（描述要具体、有画面感，像在讲一个小故事）。\n\n【动手试试】给出2-3个具体、能立刻上手的小实验或小方案，让用户通过亲自动手来理解这个概念（要写清楚具体做什么，最好举一个可直接复制的例子）。\n\n语言生动简洁，不要堆砌术语，不要客套。`;
-      const result = await callClaude(`请讲解这个 AI 词汇/概念：${query}`, sys);
+      const sys = `你是学习知识管理专家。下面是用户零散的多篇笔记。请把里面的知识点【提炼 + 分类整理】成一份条理清晰的中文知识地图：\n1. 先自动归纳出几个大类（按主题/领域），每个大类给一个简短标题\n2. 每个大类下用精炼的分条列出核心知识点（合并重复、去掉冗余、每条一句话）\n3. 重点/难点用 ★ 标注\n4. 最后加一段【知识关联】，说明不同主题之间的联系\n输出结构化、精炼，不要照抄原文。`;
+      const result = await callClaude(text, sys);
       setOutput(result);
-      setHistory(h => h.find(x => x.term === query) ? h : [{ term: query, result }, ...h.slice(0, 19)]);
-    } catch (e) { setError("讲解失败: " + e.message); }
+    } catch (e) { setError("整理失败: " + e.message); }
     setProcessing(false);
+  };
+
+  const download = () => {
+    const blob = new Blob([output], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = `knowledge_digest_${new Date().toLocaleDateString("en-CA")}.txt`; a.click();
+  };
+  const saveAsNote = () => {
+    if (!output.trim()) return;
+    addNote("study", { id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), title: "知识地图 " + new Date().toLocaleDateString("zh-CN"), date: new Date().toISOString(), content: output });
+    setCounts({ study: loadNotes("study").length, meeting: loadNotes("meeting").length });
   };
 
   return (
     <PageShell feature={feature} onBack={onBack}>
-      <div style={{ marginBottom: 14 }}>
-        <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 6 }}>输入一个 AI 词汇或概念</div>
-        <div style={{ display: "flex", gap: 10 }}>
-          <input value={term} onChange={e => setTerm(e.target.value)} onKeyDown={e => e.key === "Enter" && explain()} placeholder="例如：MCP、Skill、RAG…"
-            style={{ ...glass({ borderRadius: 12 }), flex: 1, padding: "11px 14px", color: "#f1f5f9", fontSize: 14, outline: "none", fontFamily: "system-ui" }}
-            onFocus={e => e.target.style.borderColor = feature.glow} onBlur={e => e.target.style.borderColor = "rgba(255,255,255,0.09)"} />
-          <ActionBtn onClick={() => explain()} loading={processing} disabled={!term.trim()} gradient={feature.gradient}>讲解</ActionBtn>
-        </div>
+      <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 14, lineHeight: 1.6 }}>
+        把你散落的笔记自动<strong style={{ color: "#e2e8f0" }}>提炼 + 分类</strong>成一张知识地图。
       </div>
 
-      {/* quick suggestions */}
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-        {SUGGESTIONS.map(s => (
-          <button key={s} onClick={() => { setTerm(s); explain(s); }} style={{ ...glass({ borderRadius: 999 }), padding: "5px 12px", color: "#94a3b8", fontSize: 12, cursor: "pointer" }}
-            onMouseEnter={e => { e.currentTarget.style.borderColor = feature.glow; e.currentTarget.style.color = feature.glow; }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.09)"; e.currentTarget.style.color = "#94a3b8"; }}
-          >{s}</button>
+      <div style={{ fontSize: 12, color: "#64748b", marginBottom: 8 }}>整理来源</div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        {[{ v: "study", l: `📚 学习笔记 (${counts.study})` }, { v: "meeting", l: `📋 会议记录 (${counts.meeting})` }, { v: "both", l: "全部" }].map(t => (
+          <button key={t.v} onClick={() => setSrc(t.v)} style={{ ...glass({ borderRadius: 10 }), padding: "7px 14px", fontSize: 12, cursor: "pointer", background: src === t.v ? `${feature.glow}33` : "rgba(255,255,255,0.045)", borderColor: src === t.v ? feature.glow : "rgba(255,255,255,0.09)", color: src === t.v ? feature.glow : "#94a3b8" }}>{t.l}</button>
         ))}
       </div>
 
+      <ActionBtn onClick={organize} loading={processing} disabled={!available} gradient={feature.gradient}>🗂️ 整理知识点</ActionBtn>
+      {!available && <div style={{ marginTop: 12, color: "#64748b", fontSize: 12 }}>暂无笔记。去 Live Translate / Video 翻译后点「Summarize」生成笔记，再回来整理。</div>}
       {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
-      {processing && <div style={{ textAlign: "center", padding: 20, color: feature.glow, fontSize: 13 }}>⏳ 正在通俗讲解…</div>}
-      {output && !processing && <ResultBox content={output} label={`🧠 ${activeTerm}`} accent={feature.glow} />}
-
-      {history.length > 0 && (
-        <div style={{ marginTop: 24 }}>
-          <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 10 }}>查过的概念 ({history.length})</div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {history.map((w, i) => (
-              <button key={i} onClick={() => { setActiveTerm(w.term); setOutput(w.result); }} style={{ ...glass({ borderRadius: 10 }), padding: "6px 14px", color: "#cbd5e1", fontSize: 13, cursor: "pointer", fontWeight: 600 }}
-                onMouseEnter={e => { e.currentTarget.style.borderColor = feature.glow; e.currentTarget.style.color = feature.glow; }}
-                onMouseLeave={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.09)"; e.currentTarget.style.color = "#cbd5e1"; }}
-              >{w.term}</button>
-            ))}
+      {processing && <div style={{ textAlign: "center", padding: 20, color: feature.glow, fontSize: 13 }}>⏳ 正在提炼分类…</div>}
+      {output && !processing && (
+        <>
+          <ResultBox content={output} label="🗂️ 知识地图" accent={feature.glow} onDownload={download} />
+          <div style={{ marginTop: 10 }}>
+            <button onClick={saveAsNote} style={{ ...glass({ borderRadius: 8 }), padding: "6px 14px", fontSize: 12, color: feature.glow, borderColor: `${feature.glow}44`, cursor: "pointer" }}>💾 保存为一条笔记</button>
           </div>
-        </div>
+        </>
       )}
     </PageShell>
   );
@@ -1044,7 +1058,7 @@ export default function App() {
     case "meeting-notes": page = <MeetingNotesPage feature={feature} onBack={back} />; break;
     case "video-zh": page = <VideoTranslatePage feature={feature} onBack={back} />; break;
     case "study-notes": page = <StudyNotesPage feature={feature} onBack={back} />; break;
-    case "vocab": page = <VocabPage feature={feature} onBack={back} />; break;
+    case "vocab": page = <KnowledgeDigestPage feature={feature} onBack={back} />; break;
     default: page = <HomeScreen onSelect={setCurrent} />;
   }
 
