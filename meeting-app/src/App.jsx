@@ -202,229 +202,6 @@ function useSpeechRecognition({ lang, onResult, onEnd }) {
   return { listening, supported, start, stop };
 }
 
-// ── useDeepgramSTT ───────────────────────────────────────────
-// Pro engine: captures gapless audio with AudioWorklet and streams it straight
-// to Deepgram's live WebSocket (token minted by our backend). Same interface as
-// useSpeechRecognition so it drops into the rolling-translate pipeline. start()
-// is async and throws if Deepgram isn't reachable (e.g. key not set).
-function useDeepgramSTT({ language, onResult, onEnd }) {
-  const [listening, setListening] = useState(false);
-  const supported = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia
-    && typeof window !== "undefined" && !!(window.AudioContext || window.webkitAudioContext);
-
-  const accRef = useRef("");
-  const interimRef = useRef("");
-  const wsRef = useRef(null);
-  const ctxRef = useRef(null);
-  const streamRef = useRef(null);
-  const nodeRef = useRef(null);
-  const onResultRef = useRef(onResult); onResultRef.current = onResult;
-  const onEndRef = useRef(onEnd); onEndRef.current = onEnd;
-
-  const cleanup = useCallback(() => {
-    try { nodeRef.current?.disconnect(); } catch {}
-    try { streamRef.current?.getTracks().forEach(t => t.stop()); } catch {}
-    try { if (ctxRef.current && ctxRef.current.state !== "closed") ctxRef.current.close(); } catch {}
-    try {
-      const ws = wsRef.current;
-      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "CloseStream" }));
-      ws?.close();
-    } catch {}
-    nodeRef.current = null; streamRef.current = null; ctxRef.current = null; wsRef.current = null;
-  }, []);
-
-  const start = useCallback(async () => {
-    accRef.current = ""; interimRef.current = "";
-    // 1. short-lived token from our backend
-    const tr = await fetch("/api/deepgram-token", { method: "POST" });
-    const tj = await tr.json();
-    if (tj.error || !tj.token) throw new Error(tj.error || "no token");
-
-    // 2. mic → AudioWorklet (gapless PCM)
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
-    streamRef.current = stream;
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    ctxRef.current = ctx;
-    await ctx.audioWorklet.addModule("/pcm-worklet.js");
-    const source = ctx.createMediaStreamSource(stream);
-    const node = new AudioWorkletNode(ctx, "pcm-processor");
-    nodeRef.current = node;
-    source.connect(node);
-    node.connect(ctx.destination); // required so the graph "pulls" the worklet; our processor outputs silence, so no echo
-
-    // 3. open WebSocket straight to Deepgram (send PCM at the context's rate)
-    const params = new URLSearchParams({
-      model: "nova-3", language, encoding: "linear16",
-      sample_rate: String(Math.round(ctx.sampleRate)), channels: "1",
-      interim_results: "true", punctuate: "true", smart_format: "true", endpointing: "300",
-    });
-    const url = "wss://api.deepgram.com/v1/listen?" + params.toString();
-    const openWith = (proto) => new Promise((resolve, reject) => {
-      const ws = new WebSocket(url, proto);
-      let opened = false;
-      ws.onopen = () => { opened = true; resolve(ws); };
-      ws.onerror = () => { if (!opened) reject(new Error("ws error")); };
-      ws.onclose = () => { if (!opened) reject(new Error("ws closed")); };
-    });
-    let ws;
-    try { ws = await openWith(["bearer", tj.token]); }
-    catch { ws = await openWith(["token", tj.token]); } // subprotocol fallback
-    wsRef.current = ws;
-
-    ws.onmessage = (ev) => {
-      let m; try { m = JSON.parse(ev.data); } catch { return; }
-      if (m.type !== "Results") return;
-      const txt = m.channel?.alternatives?.[0]?.transcript || "";
-      if (!txt) return;
-      if (m.is_final) {
-        accRef.current += (accRef.current ? " " : "") + txt;
-        interimRef.current = "";
-        onResultRef.current({ interim: "", accumulated: accRef.current, finalChunk: txt });
-      } else {
-        interimRef.current = txt;
-        onResultRef.current({ interim: txt, accumulated: accRef.current, finalChunk: "" });
-      }
-    };
-
-    node.port.onmessage = (e) => {
-      const ws2 = wsRef.current;
-      if (ws2 && ws2.readyState === 1) ws2.send(e.data);
-    };
-    setListening(true);
-  }, [language]);
-
-  const stop = useCallback(() => {
-    cleanup();
-    setListening(false);
-    onEndRef.current?.(accRef.current);
-  }, [cleanup]);
-
-  useEffect(() => () => cleanup(), [cleanup]);
-  return { listening, supported, start, stop };
-}
-
-// encode mono Int16 PCM as a WAV file (ArrayBuffer)
-function encodeWav(int16, sampleRate) {
-  const n = int16.length;
-  const ab = new ArrayBuffer(44 + n * 2);
-  const dv = new DataView(ab);
-  const ws = (off, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); };
-  ws(0, "RIFF"); dv.setUint32(4, 36 + n * 2, true); ws(8, "WAVE");
-  ws(12, "fmt "); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
-  dv.setUint32(24, sampleRate, true); dv.setUint32(28, sampleRate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
-  ws(36, "data"); dv.setUint32(40, n * 2, true);
-  for (let i = 0; i < n; i++) dv.setInt16(44 + i * 2, int16[i], true);
-  return ab;
-}
-function abToB64(ab) {
-  const bytes = new Uint8Array(ab); let bin = ""; const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
-  return btoa(bin);
-}
-
-// ── useOpenAITranscribe ──────────────────────────────────────
-// Pro engine: AudioWorklet captures gapless audio; we slice it on natural
-// pauses (simple silence detection) and send each clip to gpt-4o-transcribe.
-// Same interface as the other engines so it slots into the rolling pipeline.
-function useOpenAITranscribe({ language, onResult, onEnd, onError, onStatus }) {
-  const [listening, setListening] = useState(false);
-  const supported = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia
-    && typeof window !== "undefined" && !!(window.AudioContext || window.webkitAudioContext);
-
-  const accRef = useRef("");
-  const onResultRef = useRef(onResult); onResultRef.current = onResult;
-  const onEndRef = useRef(onEnd); onEndRef.current = onEnd;
-  const onErrorRef = useRef(onError); onErrorRef.current = onError;
-  const onStatusRef = useRef(onStatus); onStatusRef.current = onStatus;
-  const ctxRef = useRef(null), streamRef = useRef(null), nodeRef = useRef(null);
-  const bufRef = useRef([]); const bufLenRef = useRef(0);
-  const srRef = useRef(16000); const silRef = useRef(0); const voicedRef = useRef(0);
-  const chainRef = useRef(Promise.resolve());
-  const sentRef = useRef(0); // clips sent (for status)
-
-  const transcribe = useCallback(async (int16, sr) => {
-    const wav = encodeWav(int16, sr);
-    try {
-      const r = await fetch("/api/transcribe", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ audio: abToB64(wav), language }),
-      });
-      const j = await r.json();
-      if (j.error) { onErrorRef.current?.("转写失败：" + j.error); return; }
-      const txt = (j.text || "").trim();
-      if (txt) {
-        accRef.current += (accRef.current ? " " : "") + txt;
-        onResultRef.current({ interim: "", accumulated: accRef.current, finalChunk: txt });
-      }
-    } catch (e) { onErrorRef.current?.("转写请求异常：" + e.message); }
-  }, [language]);
-
-  const flush = useCallback(() => {
-    const sr = srRef.current;
-    const voicedSecs = voicedRef.current / sr;
-    const grab = () => {
-      const total = bufLenRef.current;
-      const merged = new Int16Array(total);
-      let off = 0; for (const f of bufRef.current) { merged.set(f, off); off += f.length; }
-      bufRef.current = []; bufLenRef.current = 0; silRef.current = 0; voicedRef.current = 0;
-      return merged;
-    };
-    if (!bufRef.current.length) return;
-    // drop near-silent clips — avoids Whisper "I don't know." style hallucinations
-    if (voicedSecs < 0.6) { grab(); return; }
-    const merged = grab();
-    sentRef.current += 1;
-    onStatusRef.current?.(`🎙️ 已捕获 ${sentRef.current} 段，识别中…`);
-    chainRef.current = chainRef.current.then(() => transcribe(merged, sr)); // keep order
-  }, [transcribe]);
-
-  const cleanup = useCallback(() => {
-    try { nodeRef.current?.disconnect(); } catch {}
-    try { streamRef.current?.getTracks().forEach(t => t.stop()); } catch {}
-    try { if (ctxRef.current && ctxRef.current.state !== "closed") ctxRef.current.close(); } catch {}
-    nodeRef.current = null; streamRef.current = null; ctxRef.current = null;
-  }, []);
-
-  const start = useCallback(async () => {
-    accRef.current = ""; bufRef.current = []; bufLenRef.current = 0; silRef.current = 0; voicedRef.current = 0; sentRef.current = 0;
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
-    streamRef.current = stream;
-    let ctx;
-    try { ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 }); }
-    catch { ctx = new (window.AudioContext || window.webkitAudioContext)(); }
-    ctxRef.current = ctx; srRef.current = Math.round(ctx.sampleRate);
-    await ctx.audioWorklet.addModule("/pcm-worklet.js");
-    const source = ctx.createMediaStreamSource(stream);
-    const node = new AudioWorkletNode(ctx, "pcm-processor");
-    nodeRef.current = node;
-    source.connect(node);
-    node.connect(ctx.destination); // required so the graph "pulls" the worklet; processor outputs silence, so no echo
-
-    const SIL = 0.012; // silence RMS threshold
-    node.port.onmessage = (e) => {
-      const frame = new Int16Array(e.data);
-      bufRef.current.push(frame); bufLenRef.current += frame.length;
-      let sum = 0; for (let i = 0; i < frame.length; i++) { const v = frame[i] / 32768; sum += v * v; }
-      const rms = Math.sqrt(sum / frame.length);
-      if (rms < SIL) silRef.current += frame.length; else { silRef.current = 0; voicedRef.current += frame.length; }
-      const sr = srRef.current;
-      const secs = bufLenRef.current / sr, silSecs = silRef.current / sr, voicedSecs = voicedRef.current / sr;
-      // coarse slicing: only cut on a clear pause after enough real speech, or
-      // force-cut at 18s. Fewer, larger clips → far fewer requests (RPM) + better accuracy.
-      if ((secs >= 4 && silSecs >= 0.6 && voicedSecs >= 1.2) || secs >= 18) flush();
-    };
-    setListening(true);
-  }, [flush]);
-
-  const stop = useCallback(() => {
-    flush(); cleanup(); setListening(false);
-    chainRef.current.then(() => onEndRef.current?.(accRef.current));
-  }, [flush, cleanup]);
-
-  useEffect(() => () => cleanup(), [cleanup]);
-  return { listening, supported, start, stop };
-}
-
 // ── useRollingTranslate ──────────────────────────────────────
 // Buffers recognized chunks and auto-translates them a paragraph at a time:
 // it waits until either ~maxChars of text has piled up, or a longer pause
@@ -432,6 +209,7 @@ function useOpenAITranscribe({ language, onResult, onEnd, onError, onStatus }) {
 // {id, src, tr, pending} segments.
 function useRollingTranslate(sys, { debounce = 3500, maxChars = 140 } = {}) {
   const [segments, setSegments] = useState([]);
+  const [pendingText, setPendingText] = useState(""); // recognized but not-yet-translated (kept visible)
   const pendingRef = useRef("");
   const timerRef = useRef(null);
   const sysRef = useRef(sys);
@@ -454,12 +232,14 @@ function useRollingTranslate(sys, { debounce = 3500, maxChars = 140 } = {}) {
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
     const text = pendingRef.current;
     pendingRef.current = "";
+    setPendingText("");
     if (text.trim()) translateChunk(text);
   }, [translateChunk]);
 
   const onFinal = useCallback((chunk) => {
     if (!chunk || !chunk.trim()) return;
     pendingRef.current += chunk;
+    setPendingText(pendingRef.current); // keep it on screen until it becomes a card
     if (timerRef.current) clearTimeout(timerRef.current);
     // translate once we've gathered a paragraph's worth of text — but defer it
     // so this speech-recognition callback returns immediately and the engine
@@ -472,13 +252,14 @@ function useRollingTranslate(sys, { debounce = 3500, maxChars = 140 } = {}) {
   const reset = useCallback(() => {
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
     pendingRef.current = "";
+    setPendingText("");
     setSegments([]);
   }, []);
 
   useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
 
   const fullText = segments.filter(s => s.tr && !s.pending).map(s => s.tr).join("\n");
-  return { segments, onFinal, flush, reset, fullText };
+  return { segments, pendingText, onFinal, flush, reset, fullText };
 }
 
 // Notta-style transcript feed: timestamp + speaker + original (top) + translation (below).
@@ -831,18 +612,6 @@ function TabSwitch({ tab, setTab, glow }) {
   );
 }
 
-// engine picker: Pro (Deepgram) vs Free (browser Web Speech)
-function EngineToggle({ engine, setEngine, glow, disabled }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-      <span style={{ fontSize: 11, color: "#64748b" }}>识别引擎:</span>
-      {[{ v: "pro", l: "⚡ Pro (OpenAI)" }, { v: "free", l: "Free (浏览器)" }].map(t => (
-        <button key={t.v} onClick={() => !disabled && setEngine(t.v)} disabled={disabled} style={{ ...glass({ borderRadius: 999 }), padding: "5px 12px", fontSize: 12, cursor: disabled ? "not-allowed" : "pointer", background: engine === t.v ? `${glow}33` : "rgba(255,255,255,0.045)", borderColor: engine === t.v ? glow : "rgba(255,255,255,0.09)", color: engine === t.v ? glow : "#94a3b8", fontWeight: 600 }}>{t.l}</button>
-      ))}
-    </div>
-  );
-}
-
 // ── Feature Pages ────────────────────────────────────────────
 function TranslatePage({ feature, onBack }) {
   const isZh = feature.id === "jp-zh";
@@ -858,25 +627,15 @@ function TranslatePage({ feature, onBack }) {
   const [tab, setTab] = useState("mic");
   const [error, setError] = useState("");
 
-  const [status, setStatus] = useState("");
-  const { segments, onFinal, flush, reset, fullText } = useRollingTranslate(sys);
-
-  const [engine, setEngine] = useState("pro"); // "pro" = OpenAI, "free" = browser
-  const handleResult = ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); };
-  const dg = useOpenAITranscribe({ language: "ja", onResult: handleResult, onEnd: () => flush(), onError: setError, onStatus: setStatus });
-  const sr = useSpeechRecognition({ lang: "ja-JP", onResult: handleResult, onEnd: () => flush() });
-  const active = engine === "pro" ? dg : sr;
-  const { listening, supported, stop } = active;
+  const { segments, pendingText, onFinal, flush, reset, fullText } = useRollingTranslate(sys);
+  const { listening, supported, start, stop } = useSpeechRecognition({
+    lang: "ja-JP",
+    onResult: ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); },
+    onEnd: () => flush(),
+  });
 
   // keep prior transcripts across mic sessions — only clear interim/error
-  const startLive = async () => {
-    setInterim(""); setError(""); setStatus("");
-    if (engine === "pro") {
-      try { await dg.start(); return; }
-      catch (e) { setEngine("free"); setError("Pro 引擎不可用(" + e.message + ")，已切到 Free。"); try { sr.start(); } catch {} return; }
-    }
-    try { sr.start(); } catch {}
-  };
+  const startLive = () => { setInterim(""); setError(""); start(); };
 
   const translateManual = async (text) => {
     setError(""); setTranslating(true);
@@ -887,30 +646,22 @@ function TranslatePage({ feature, onBack }) {
     setTranslating(false);
   };
 
-  const download = (text) => {
-    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
-    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-    a.download = `translation_${new Date().toLocaleDateString("en-CA")}.txt`; a.click();
-  };
-
   return (
     <PageShell feature={feature} onBack={onBack}>
       <TabSwitch tab={tab} setTab={setTab} glow={feature.glow} />
       {tab === "mic" ? (
         <>
-          <EngineToggle engine={engine} setEngine={setEngine} glow={feature.glow} disabled={listening} />
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 16, padding: "24px 0" }}>
             <MicButton listening={listening} onStart={startLive} onStop={stop} glow={feature.glow} disabled={!supported} />
             <Waveform active={listening} glow={feature.glow} />
             <div style={{ fontSize: 13, color: listening ? feature.glow : "#64748b", fontWeight: 600, textAlign: "center" }}>
-              {!supported ? "⚠️ Please use Chrome browser"
-                : listening ? "🔴 Live translating... keep talking, tap to stop"
-                : "Tap once — it translates as you speak, no need to hold"}
+              {!supported ? "⚠️ 请使用 Chrome 浏览器"
+                : listening ? "🔴 实时翻译中... 边说边译，点击停止"
+                : "点一次即可 — 边说边译，无需一直按住"}
             </div>
-            {engine === "pro" && listening && (status || !segments.length) && <div style={{ fontSize: 12, color: "#64748b" }}>{status || "OpenAI 模式：说一段后停顿，转写好会出现在下方"}</div>}
           </div>
 
-          <LiveFeed segments={segments} interim={interim} glow={feature.glow} label={`实时翻译 → ${targetLabel}`} onClear={!listening ? reset : undefined} />
+          <LiveFeed segments={segments} interim={(pendingText + interim).trim()} glow={feature.glow} label={`实时翻译 → ${targetLabel}`} onClear={!listening ? reset : undefined} />
           {!listening && <SummarizeBlock text={fullText} glow={feature.glow} gradient={feature.gradient} kind="meeting" />}
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
         </>
@@ -946,24 +697,15 @@ function VideoTranslatePage({ feature, onBack }) {
   const [mode, setMode] = useState("bilingual"); // transcript output: "bilingual" | "zh"
   const [error, setError] = useState("");
 
-  const [status, setStatus] = useState("");
   // mic mode → live rolling translation (English chunk → Chinese)
-  const { segments, onFinal, flush, reset, fullText } = useRollingTranslate(ZH_SYS);
-  const [engine, setEngine] = useState("pro");
-  const handleResult = ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); };
-  const dg = useOpenAITranscribe({ language: "en", onResult: handleResult, onEnd: () => flush(), onError: setError, onStatus: setStatus });
-  const sr = useSpeechRecognition({ lang: "en-US", onResult: handleResult, onEnd: () => flush() });
-  const active = engine === "pro" ? dg : sr;
-  const { listening, supported, stop } = active;
+  const { segments, pendingText, onFinal, flush, reset, fullText } = useRollingTranslate(ZH_SYS);
+  const { listening, supported, start, stop } = useSpeechRecognition({
+    lang: "en-US",
+    onResult: ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); },
+    onEnd: () => flush(),
+  });
   // keep prior transcripts across mic sessions — only clear interim/error
-  const startLive = async () => {
-    setInterim(""); setError(""); setStatus("");
-    if (engine === "pro") {
-      try { await dg.start(); return; }
-      catch (e) { setEngine("free"); setError("Pro 引擎不可用(" + e.message + ")，已切到 Free。"); try { sr.start(); } catch {} return; }
-    }
-    try { sr.start(); } catch {}
-  };
+  const startLive = () => { setInterim(""); setError(""); start(); };
 
   // transcript mode → translate the whole pasted text at once
   const translate = async (text) => {
@@ -1019,16 +761,15 @@ function VideoTranslatePage({ feature, onBack }) {
             <MicButton listening={listening} onStart={startLive} onStop={stop} glow={feature.glow} disabled={!supported} />
             <Waveform active={listening} glow={feature.glow} />
             <div style={{ fontSize: 13, color: listening ? feature.glow : "#64748b", fontWeight: 600, textAlign: "center" }}>
-              {!supported ? "⚠️ Please use Chrome browser"
-                : listening ? "🔴 Live translating... play the video, tap to stop"
-                : "Tap once — it transcribes & translates as the video plays"}
+              {!supported ? "⚠️ 请使用 Chrome 浏览器"
+                : listening ? "🔴 实时翻译中... 播放视频，点击停止"
+                : "点一次即可 — 边播边转写翻译"}
             </div>
-            {engine === "pro" && listening && (status || !segments.length) && <div style={{ fontSize: 12, color: "#64748b" }}>{status || "OpenAI 模式：播放一段后停顿，转写好会出现在下方"}</div>}
           </div>
           <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>
-            💡 For videos without a transcript. Best on desktop Chrome; play the audio out loud near the mic.
+            💡 用于没有字幕的视频。桌面 Chrome 效果最佳；把声音外放对着麦克风。
           </div>
-          <LiveFeed segments={segments} interim={interim} glow={feature.glow} label="🌏 实时翻译 → 中文" onClear={!listening ? reset : undefined} />
+          <LiveFeed segments={segments} interim={(pendingText + interim).trim()} glow={feature.glow} label="🌏 实时翻译 → 中文" onClear={!listening ? reset : undefined} />
           {!listening && <SummarizeBlock text={fullText} glow={feature.glow} gradient={feature.gradient} kind="study" />}
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
         </>
