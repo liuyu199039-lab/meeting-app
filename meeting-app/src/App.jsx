@@ -392,8 +392,11 @@ function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete
   const startEdit = (seg) => { setEditId(seg.id); setEditText(seg.src); };
   const saveEdit = () => { onEditSrc?.(editId, editText); setEditId(null); setEditText(""); };
 
-  const Row = ({ seg, ts, src, tr, pending, live }) => (
-    <div style={{ display: "flex", gap: 12, padding: "14px 16px", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+  // NOTE: rendered as an inline function (not a nested <Component/>) so the edit
+  // textarea keeps its DOM identity across re-renders — otherwise the cursor
+  // jumps to the start on every keystroke.
+  const renderRow = ({ key, seg, ts, src, tr, pending, live }) => (
+    <div key={key} style={{ display: "flex", gap: 12, padding: "14px 16px", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
       <div style={{ width: 44, flexShrink: 0, fontSize: 11, color: "#64748b", paddingTop: 2 }}>{ts}</div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
@@ -444,8 +447,8 @@ function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete
         </div>
       </div>
       <div style={{ maxHeight: 420, overflowY: "auto" }}>
-        {segments.map(seg => <Row key={seg.id} seg={seg} ts={fmt(seg.at)} src={seg.src} tr={seg.tr} pending={seg.pending} />)}
-        {interim && <Row ts={fmt(Date.now())} src={interim} live />}
+        {segments.map(seg => renderRow({ key: seg.id, seg, ts: fmt(seg.at), src: seg.src, tr: seg.tr, pending: seg.pending }))}
+        {interim && renderRow({ key: "live", ts: fmt(Date.now()), src: interim, live: true })}
       </div>
     </div>
   );
