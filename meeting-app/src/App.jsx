@@ -346,17 +346,35 @@ function useRollingTranslate(sys, { debounce = 3500, maxChars = 140 } = {}) {
     setSegments([]);
   }, []);
 
+  // manually fix a mis-recognized segment; empty text deletes it, otherwise re-translate
+  const editSegment = useCallback(async (id, newSrc) => {
+    const src = (newSrc || "").trim();
+    if (!src) { setSegments(s => s.filter(seg => seg.id !== id)); return; }
+    setSegments(s => s.map(seg => seg.id === id ? { ...seg, src, tr: "", pending: true } : seg));
+    try {
+      const result = await callClaude(src, sysRef.current);
+      setSegments(s => s.map(seg => seg.id === id ? { ...seg, tr: result, pending: false } : seg));
+    } catch (e) {
+      setSegments(s => s.map(seg => seg.id === id ? { ...seg, tr: "⚠️ " + e.message, pending: false } : seg));
+    }
+  }, []);
+
+  const deleteSegment = useCallback((id) => setSegments(s => s.filter(seg => seg.id !== id)), []);
+
   useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
 
   const fullText = segments.filter(s => s.tr && !s.pending).map(s => s.tr).join("\n");
-  return { segments, pendingText, onFinal, flush, reset, fullText };
+  return { segments, pendingText, onFinal, flush, reset, fullText, editSegment, deleteSegment };
 }
 
 // Notta-style transcript feed: timestamp + speaker + original (top) + translation (below).
-function LiveFeed({ segments, interim, glow, label, onClear }) {
+// Recognized text (src) can be edited inline; on save it is re-translated.
+function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete }) {
   const btn = { background: "none", border: `1px solid ${glow}44`, color: glow, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer" };
   const [speaker, setSpeaker] = useState("话者 1");
   const [editing, setEditing] = useState(false);
+  const [editId, setEditId] = useState(null); // segment being edited
+  const [editText, setEditText] = useState("");
   if (!segments.length && !interim) return null;
 
   const t0 = segments.length ? segments[0].at : Date.now();
@@ -371,8 +389,10 @@ function LiveFeed({ segments, interim, glow, label, onClear }) {
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
     a.download = `transcript_${new Date().toLocaleDateString("en-CA")}.txt`; a.click();
   };
+  const startEdit = (seg) => { setEditId(seg.id); setEditText(seg.src); };
+  const saveEdit = () => { onEditSrc?.(editId, editText); setEditId(null); setEditText(""); };
 
-  const Row = ({ ts, src, tr, pending, live }) => (
+  const Row = ({ seg, ts, src, tr, pending, live }) => (
     <div style={{ display: "flex", gap: 12, padding: "14px 16px", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
       <div style={{ width: 44, flexShrink: 0, fontSize: 11, color: "#64748b", paddingTop: 2 }}>{ts}</div>
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -380,9 +400,27 @@ function LiveFeed({ segments, interim, glow, label, onClear }) {
           <span style={{ width: 16, height: 16, borderRadius: "50%", background: glow, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9 }}>🗣</span>
           <span style={{ fontSize: 12, color: "#94a3b8", fontWeight: 600 }}>{name}</span>
           {live && <span style={{ fontSize: 10, color: glow }}>● 识别中</span>}
+          {!live && seg && editId !== seg.id && (
+            <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+              <button onClick={() => startEdit(seg)} title="修改识别文字" style={{ background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: 12 }}>✎</button>
+              {onDelete && <button onClick={() => onDelete(seg.id)} title="删除这段" style={{ background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: 12 }}>🗑</button>}
+            </span>
+          )}
         </div>
-        <div style={{ fontSize: 15, color: live ? "#94a3b8" : "#f1f5f9", lineHeight: 1.6 }}>{src}{live && <span style={{ color: "#475569" }}>…</span>}</div>
-        {!live && <div style={{ fontSize: 14, color: pending ? "#64748b" : "#a5b4fc", lineHeight: 1.6, marginTop: 4 }}>{pending ? "翻译中…" : tr}</div>}
+        {!live && seg && editId === seg.id ? (
+          <div>
+            <textarea autoFocus value={editText} onChange={e => setEditText(e.target.value)} rows={2}
+              onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) saveEdit(); if (e.key === "Escape") { setEditId(null); } }}
+              style={{ ...glass({ borderRadius: 8 }), width: "100%", boxSizing: "border-box", padding: 8, color: "#f1f5f9", fontSize: 15, lineHeight: 1.6, outline: "none", resize: "vertical", fontFamily: "system-ui" }} />
+            <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+              <button onClick={saveEdit} style={{ ...btn, background: `${glow}22` }}>✓ 保存并重译</button>
+              <button onClick={() => { setEditId(null); setEditText(""); }} style={{ ...btn, color: "#94a3b8", borderColor: "rgba(255,255,255,0.15)" }}>取消</button>
+            </div>
+          </div>
+        ) : (
+          <div style={{ fontSize: 15, color: live ? "#94a3b8" : "#f1f5f9", lineHeight: 1.6 }}>{src}{live && <span style={{ color: "#475569" }}>…</span>}</div>
+        )}
+        {!live && editId !== (seg && seg.id) && <div style={{ fontSize: 14, color: pending ? "#64748b" : "#a5b4fc", lineHeight: 1.6, marginTop: 4 }}>{pending ? "翻译中…" : tr}</div>}
       </div>
     </div>
   );
@@ -406,7 +444,7 @@ function LiveFeed({ segments, interim, glow, label, onClear }) {
         </div>
       </div>
       <div style={{ maxHeight: 420, overflowY: "auto" }}>
-        {segments.map(seg => <Row key={seg.id} ts={fmt(seg.at)} src={seg.src} tr={seg.tr} pending={seg.pending} />)}
+        {segments.map(seg => <Row key={seg.id} seg={seg} ts={fmt(seg.at)} src={seg.src} tr={seg.tr} pending={seg.pending} />)}
         {interim && <Row ts={fmt(Date.now())} src={interim} live />}
       </div>
     </div>
@@ -728,7 +766,7 @@ function TranslatePage({ feature, onBack }) {
   const [tab, setTab] = useState("mic");
   const [error, setError] = useState("");
 
-  const { segments, pendingText, onFinal, flush, reset, fullText } = useRollingTranslate(sys);
+  const { segments, pendingText, onFinal, flush, reset, fullText, editSegment, deleteSegment } = useRollingTranslate(sys);
   const [engine, setEngine] = useState("free"); // "free" = Google, "pro" = OpenAI realtime
   const handleResult = ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); };
   const rt = useOpenAIRealtimeSTT({ language: "ja", onResult: handleResult, onEnd: () => flush() });
@@ -771,7 +809,7 @@ function TranslatePage({ feature, onBack }) {
             </div>
           </div>
 
-          <LiveFeed segments={segments} interim={(pendingText + interim).trim()} glow={feature.glow} label={`实时翻译 → ${targetLabel}`} onClear={!listening ? reset : undefined} />
+          <LiveFeed segments={segments} interim={(pendingText + interim).trim()} glow={feature.glow} label={`实时翻译 → ${targetLabel}`} onClear={!listening ? reset : undefined} onEditSrc={editSegment} onDelete={deleteSegment} />
           {!listening && <SummarizeBlock text={fullText} glow={feature.glow} gradient={feature.gradient} kind="meeting" />}
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
         </>
@@ -808,7 +846,7 @@ function VideoTranslatePage({ feature, onBack }) {
   const [error, setError] = useState("");
 
   // mic mode → live rolling translation (English chunk → Chinese)
-  const { segments, pendingText, onFinal, flush, reset, fullText } = useRollingTranslate(ZH_SYS);
+  const { segments, pendingText, onFinal, flush, reset, fullText, editSegment, deleteSegment } = useRollingTranslate(ZH_SYS);
   const [engine, setEngine] = useState("free");
   const handleResult = ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); };
   const rt = useOpenAIRealtimeSTT({ language: "en", onResult: handleResult, onEnd: () => flush() });
@@ -887,7 +925,7 @@ function VideoTranslatePage({ feature, onBack }) {
           <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>
             💡 用于没有字幕的视频。桌面 Chrome 效果最佳；把声音外放对着麦克风。
           </div>
-          <LiveFeed segments={segments} interim={(pendingText + interim).trim()} glow={feature.glow} label="🌏 实时翻译 → 中文" onClear={!listening ? reset : undefined} />
+          <LiveFeed segments={segments} interim={(pendingText + interim).trim()} glow={feature.glow} label="🌏 实时翻译 → 中文" onClear={!listening ? reset : undefined} onEditSrc={editSegment} onDelete={deleteSegment} />
           {!listening && <SummarizeBlock text={fullText} glow={feature.glow} gradient={feature.gradient} kind="study" />}
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
         </>
