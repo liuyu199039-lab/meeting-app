@@ -35,6 +35,15 @@ function addNote(kind, note) {
 function removeNote(kind, id) {
   saveNotesList(kind, loadNotes(kind).filter(n => n.id !== id));
 }
+function updateNote(kind, id, patch) {
+  saveNotesList(kind, loadNotes(kind).map(n => n.id === id ? { ...n, ...patch } : n));
+}
+// "2026年7月16日 10:15"
+function cjkDateTime(d = new Date()) {
+  const dt = typeof d === "string" ? new Date(d) : d;
+  const p = (n) => String(n).padStart(2, "0");
+  return `${dt.getFullYear()}年${dt.getMonth() + 1}月${dt.getDate()}日 ${p(dt.getHours())}:${p(dt.getMinutes())}`;
+}
 // pull a "标题：xxx" line out of generated text, returning {title, body}
 function parseTitle(text, fallback) {
   const firstLine = text.split("\n").find(l => l.trim()) || "";
@@ -372,7 +381,7 @@ const SPEAKER_COLORS = ["#6366f1", "#10b981", "#f59e0b", "#ec4899", "#06b6d4"];
 // Notta-style transcript feed: timestamp + speaker + original (top) + translation (below).
 // Supports up to 5 manually-named speakers; each segment's speaker is selectable.
 // Recognized text (src) can be edited inline; on save it is re-translated.
-function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete }) {
+function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete, onTranscript }) {
   const btn = { background: "none", border: `1px solid ${glow}44`, color: glow, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer" };
   const [speakers, setSpeakers] = useState(["话者 1"]); // names, max 5
   const [current, setCurrent] = useState(0); // default speaker for new segments
@@ -390,8 +399,6 @@ function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete
     });
   }, [segments, current]);
 
-  if (!segments.length && !interim) return null;
-
   const spName = (i) => (speakers[i] || `话者 ${i + 1}`).trim() || `话者 ${i + 1}`;
   const spColor = (i) => SPEAKER_COLORS[i % SPEAKER_COLORS.length];
   const segSpk = (seg) => assign[seg.id] ?? 0;
@@ -402,6 +409,13 @@ function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete
     return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
   };
   const transcript = segments.map(s => `[${fmt(s.at)}] ${spName(segSpk(s))}\n${s.src}\n${s.tr}`).join("\n\n");
+
+  // report the speaker-labeled transcript up so it can be saved alongside the summary
+  const onTranscriptRef = useRef(onTranscript); onTranscriptRef.current = onTranscript;
+  useEffect(() => { onTranscriptRef.current?.(transcript); }, [transcript]);
+
+  if (!segments.length && !interim) return null;
+
   const download = () => {
     const blob = new Blob([transcript], { type: "text/plain;charset=utf-8" });
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
@@ -504,7 +518,7 @@ function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete
 
 // reusable "summarize accumulated text into a saved note" block.
 // kind = "study" → Study Notes; "meeting" → Meeting Minutes.
-function SummarizeBlock({ text, glow, gradient, kind }) {
+function SummarizeBlock({ text, transcript, glow, gradient, kind }) {
   const [notes, setNotes] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -522,7 +536,14 @@ function SummarizeBlock({ text, glow, gradient, kind }) {
       const result = await callClaude(text, NOTE_SYS[kind]);
       setNotes(result);
       const { title, body } = parseTitle(result, isMeeting ? "会议记录" : "学习笔记");
-      addNote(kind, { id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), title, date: new Date().toISOString(), content: body });
+      const now = new Date();
+      addNote(kind, {
+        id: Date.now() + "-" + Math.random().toString(36).slice(2, 7),
+        title: `${cjkDateTime(now)} ${title}`,
+        date: now.toISOString(),
+        content: body,
+        transcript: (transcript || "").trim() || undefined, // full original transcript for reference
+      });
       setSaved(true);
     } catch (e) { setError("Failed: " + e.message); }
     setLoading(false);
@@ -561,6 +582,14 @@ function NotesLibrary({ feature, kind }) {
   const del = (id) => { removeNote(kind, id); setNotes(loadNotes(kind)); if (openId === id) setOpenId(null); };
   const fmtDate = (iso) => { try { return new Date(iso).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }); } catch { return ""; } };
 
+  // inline edit of a saved note (title + content)
+  const [editId, setEditId] = useState(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editContent, setEditContent] = useState("");
+  const [showTrans, setShowTrans] = useState(false); // toggle original transcript in detail
+  const startEdit = (n) => { setEditId(n.id); setEditTitle(n.title); setEditContent(n.content); };
+  const saveEdit = () => { updateNote(kind, editId, { title: editTitle, content: editContent }); setNotes(loadNotes(kind)); setEditId(null); };
+
   const [input, setInput] = useState("");
   const [output, setOutput] = useState("");
   const [processing, setProcessing] = useState(false);
@@ -573,14 +602,16 @@ function NotesLibrary({ feature, kind }) {
       const result = await callClaude(input, NOTE_SYS[kind]);
       setOutput(result);
       const { title, body } = parseTitle(result, isMeeting ? "会议记录" : "学习笔记");
-      addNote(kind, { id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), title, date: new Date().toISOString(), content: body });
+      const now = new Date();
+      addNote(kind, { id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), title: `${cjkDateTime(now)} ${title}`, date: now.toISOString(), content: body });
       setNotes(loadNotes(kind));
     } catch (e) { setError("Generation failed: " + e.message); }
     setProcessing(false);
   };
 
   const downloadNote = (n) => {
-    const blob = new Blob([`${n.title}\n${fmtDate(n.date)}\n\n${n.content}`], { type: "text/plain;charset=utf-8" });
+    const body = `${n.title}\n${fmtDate(n.date)}\n\n${n.content}` + (n.transcript ? `\n\n──── 原文记录 ────\n${n.transcript}` : "");
+    const blob = new Blob([body], { type: "text/plain;charset=utf-8" });
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
     a.download = `${n.title}.txt`; a.click();
   };
@@ -639,22 +670,47 @@ function NotesLibrary({ feature, kind }) {
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {notes.map(n => (
               <div key={n.id} style={{ ...glass({ borderRadius: 14, borderColor: openId === n.id ? `${feature.glow}55` : "rgba(255,255,255,0.09)" }), overflow: "hidden" }}>
-                <div onClick={() => setOpenId(openId === n.id ? null : n.id)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 16px", cursor: "pointer" }}>
+                <div onClick={() => { if (editId !== n.id) setOpenId(openId === n.id ? null : n.id); }} style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 16px", cursor: "pointer" }}>
                   <div style={{ width: 36, height: 36, borderRadius: 10, background: feature.gradient, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}>{isMeeting ? "📋" : "📄"}</div>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: "#f1f5f9", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{n.title}</div>
+                    {editId === n.id ? (
+                      <input value={editTitle} onChange={e => setEditTitle(e.target.value)} onClick={e => e.stopPropagation()}
+                        style={{ ...glass({ borderRadius: 6 }), width: "100%", boxSizing: "border-box", padding: "4px 8px", color: "#f1f5f9", fontSize: 14, fontWeight: 700, outline: "none" }} />
+                    ) : (
+                      <div style={{ fontSize: 14, fontWeight: 700, color: "#f1f5f9", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{n.title}</div>
+                    )}
                     <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{fmtDate(n.date)}</div>
                   </div>
                   <span style={{ color: "#64748b", fontSize: 13 }}>{openId === n.id ? "▲" : "▼"}</span>
                 </div>
                 {openId === n.id && (
                   <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)" }}>
-                    <pre style={{ margin: 0, padding: 16, color: "#cbd5e1", fontSize: 14, lineHeight: 1.8, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "system-ui" }}>{n.content}</pre>
-                    <div style={{ display: "flex", gap: 8, padding: "0 16px 14px" }}>
-                      <button onClick={() => navigator.clipboard.writeText(n.content)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>Copy</button>
-                      <button onClick={() => downloadNote(n)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>↓ Download</button>
-                      <button onClick={() => del(n.id)} style={{ background: "none", border: "1px solid #fb718544", color: "#fb7185", borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>Delete</button>
-                    </div>
+                    {editId === n.id ? (
+                      <div style={{ padding: 16 }}>
+                        <textarea value={editContent} onChange={e => setEditContent(e.target.value)} rows={12}
+                          style={{ ...glass({ borderRadius: 10 }), width: "100%", boxSizing: "border-box", padding: 12, color: "#e2e8f0", fontSize: 14, lineHeight: 1.8, outline: "none", resize: "vertical", fontFamily: "system-ui" }} />
+                        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                          <button onClick={saveEdit} style={{ background: feature.gradient, border: "none", color: "#fff", borderRadius: 8, padding: "6px 16px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>✓ 保存</button>
+                          <button onClick={() => setEditId(null)} style={{ background: "none", border: "1px solid rgba(255,255,255,0.15)", color: "#94a3b8", borderRadius: 8, padding: "6px 16px", fontSize: 12, cursor: "pointer" }}>取消</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <pre style={{ margin: 0, padding: 16, color: "#cbd5e1", fontSize: 14, lineHeight: 1.8, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "system-ui" }}>{n.content}</pre>
+                        {n.transcript && (
+                          <div style={{ padding: "0 16px 8px" }}>
+                            <button onClick={() => setShowTrans(v => !v)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>📄 原文记录 {showTrans ? "▲" : "▼"}</button>
+                            {showTrans && <pre style={{ margin: "10px 0 0", padding: 12, background: "rgba(255,255,255,0.03)", borderRadius: 8, color: "#94a3b8", fontSize: 13, lineHeight: 1.7, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "system-ui", maxHeight: 280, overflowY: "auto" }}>{n.transcript}</pre>}
+                          </div>
+                        )}
+                        <div style={{ display: "flex", gap: 8, padding: "8px 16px 14px" }}>
+                          <button onClick={() => startEdit(n)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>✎ 编辑</button>
+                          <button onClick={() => navigator.clipboard.writeText(n.content)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>Copy</button>
+                          <button onClick={() => downloadNote(n)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>↓ Download</button>
+                          <button onClick={() => del(n.id)} style={{ background: "none", border: "1px solid #fb718544", color: "#fb7185", borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>Delete</button>
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -818,6 +874,7 @@ function TranslatePage({ feature, onBack }) {
   const [error, setError] = useState("");
 
   const { segments, pendingText, onFinal, flush, reset, fullText, editSegment, deleteSegment } = useRollingTranslate(sys);
+  const [liveTranscript, setLiveTranscript] = useState("");
   const [engine, setEngine] = useState("free"); // "free" = Google, "pro" = OpenAI realtime
   const handleResult = ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); };
   const rt = useOpenAIRealtimeSTT({ language: "ja", onResult: handleResult, onEnd: () => flush() });
@@ -860,8 +917,8 @@ function TranslatePage({ feature, onBack }) {
             </div>
           </div>
 
-          <LiveFeed segments={segments} interim={(pendingText + interim).trim()} glow={feature.glow} label={`实时翻译 → ${targetLabel}`} onClear={!listening ? reset : undefined} onEditSrc={editSegment} onDelete={deleteSegment} />
-          {!listening && <SummarizeBlock text={fullText} glow={feature.glow} gradient={feature.gradient} kind="meeting" />}
+          <LiveFeed segments={segments} interim={(pendingText + interim).trim()} glow={feature.glow} label={`实时翻译 → ${targetLabel}`} onClear={!listening ? reset : undefined} onEditSrc={editSegment} onDelete={deleteSegment} onTranscript={setLiveTranscript} />
+          {!listening && <SummarizeBlock text={fullText} transcript={liveTranscript} glow={feature.glow} gradient={feature.gradient} kind="meeting" />}
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
         </>
       ) : (
@@ -898,6 +955,7 @@ function VideoTranslatePage({ feature, onBack }) {
 
   // mic mode → live rolling translation (English chunk → Chinese)
   const { segments, pendingText, onFinal, flush, reset, fullText, editSegment, deleteSegment } = useRollingTranslate(ZH_SYS);
+  const [liveTranscript, setLiveTranscript] = useState("");
   const [engine, setEngine] = useState("free");
   const handleResult = ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); };
   const rt = useOpenAIRealtimeSTT({ language: "en", onResult: handleResult, onEnd: () => flush() });
@@ -976,8 +1034,8 @@ function VideoTranslatePage({ feature, onBack }) {
           <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>
             💡 用于没有字幕的视频。桌面 Chrome 效果最佳；把声音外放对着麦克风。
           </div>
-          <LiveFeed segments={segments} interim={(pendingText + interim).trim()} glow={feature.glow} label="🌏 实时翻译 → 中文" onClear={!listening ? reset : undefined} onEditSrc={editSegment} onDelete={deleteSegment} />
-          {!listening && <SummarizeBlock text={fullText} glow={feature.glow} gradient={feature.gradient} kind="study" />}
+          <LiveFeed segments={segments} interim={(pendingText + interim).trim()} glow={feature.glow} label="🌏 实时翻译 → 中文" onClear={!listening ? reset : undefined} onEditSrc={editSegment} onDelete={deleteSegment} onTranscript={setLiveTranscript} />
+          {!listening && <SummarizeBlock text={fullText} transcript={liveTranscript} glow={feature.glow} gradient={feature.gradient} kind="study" />}
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
         </>
       )}
