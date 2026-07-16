@@ -367,23 +367,41 @@ function useRollingTranslate(sys, { debounce = 3500, maxChars = 140 } = {}) {
   return { segments, pendingText, onFinal, flush, reset, fullText, editSegment, deleteSegment };
 }
 
+const SPEAKER_COLORS = ["#6366f1", "#10b981", "#f59e0b", "#ec4899", "#06b6d4"];
+
 // Notta-style transcript feed: timestamp + speaker + original (top) + translation (below).
+// Supports up to 5 manually-named speakers; each segment's speaker is selectable.
 // Recognized text (src) can be edited inline; on save it is re-translated.
 function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete }) {
   const btn = { background: "none", border: `1px solid ${glow}44`, color: glow, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer" };
-  const [speaker, setSpeaker] = useState("话者 1");
-  const [editing, setEditing] = useState(false);
+  const [speakers, setSpeakers] = useState(["话者 1"]); // names, max 5
+  const [current, setCurrent] = useState(0); // default speaker for new segments
+  const [assign, setAssign] = useState({}); // segId -> speaker index
+  const [showSpk, setShowSpk] = useState(false); // speaker manager panel
   const [editId, setEditId] = useState(null); // segment being edited
   const [editText, setEditText] = useState("");
+
+  // auto-assign any new segment to the current speaker
+  useEffect(() => {
+    setAssign(prev => {
+      let changed = false; const next = { ...prev };
+      for (const s of segments) if (next[s.id] === undefined) { next[s.id] = current; changed = true; }
+      return changed ? next : prev;
+    });
+  }, [segments, current]);
+
   if (!segments.length && !interim) return null;
+
+  const spName = (i) => (speakers[i] || `话者 ${i + 1}`).trim() || `话者 ${i + 1}`;
+  const spColor = (i) => SPEAKER_COLORS[i % SPEAKER_COLORS.length];
+  const segSpk = (seg) => assign[seg.id] ?? 0;
 
   const t0 = segments.length ? segments[0].at : Date.now();
   const fmt = (at) => {
     const s = Math.max(0, Math.floor((at - t0) / 1000));
     return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
   };
-  const name = speaker.trim() || "话者 1";
-  const transcript = segments.map(s => `[${fmt(s.at)}] ${name}\n${s.src}\n${s.tr}`).join("\n\n");
+  const transcript = segments.map(s => `[${fmt(s.at)}] ${spName(segSpk(s))}\n${s.src}\n${s.tr}`).join("\n\n");
   const download = () => {
     const blob = new Blob([transcript], { type: "text/plain;charset=utf-8" });
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
@@ -392,53 +410,66 @@ function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete
   const startEdit = (seg) => { setEditId(seg.id); setEditText(seg.src); };
   const saveEdit = () => { onEditSrc?.(editId, editText); setEditId(null); setEditText(""); };
 
-  // NOTE: rendered as an inline function (not a nested <Component/>) so the edit
-  // textarea keeps its DOM identity across re-renders — otherwise the cursor
-  // jumps to the start on every keystroke.
-  const renderRow = ({ key, seg, ts, src, tr, pending, live }) => (
-    <div key={key} style={{ display: "flex", gap: 12, padding: "14px 16px", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-      <div style={{ width: 44, flexShrink: 0, fontSize: 11, color: "#64748b", paddingTop: 2 }}>{ts}</div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-          <span style={{ width: 16, height: 16, borderRadius: "50%", background: glow, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9 }}>🗣</span>
-          <span style={{ fontSize: 12, color: "#94a3b8", fontWeight: 600 }}>{name}</span>
-          {live && <span style={{ fontSize: 10, color: glow }}>● 识别中</span>}
-          {!live && seg && editId !== seg.id && (
-            <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-              <button onClick={() => startEdit(seg)} title="修改识别文字" style={{ background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: 12 }}>✎</button>
-              {onDelete && <button onClick={() => onDelete(seg.id)} title="删除这段" style={{ background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: 12 }}>🗑</button>}
-            </span>
-          )}
-        </div>
-        {!live && seg && editId === seg.id ? (
-          <div>
-            <textarea autoFocus value={editText} onChange={e => setEditText(e.target.value)} rows={2}
-              onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) saveEdit(); if (e.key === "Escape") { setEditId(null); } }}
-              style={{ ...glass({ borderRadius: 8 }), width: "100%", boxSizing: "border-box", padding: 8, color: "#f1f5f9", fontSize: 15, lineHeight: 1.6, outline: "none", resize: "vertical", fontFamily: "system-ui" }} />
-            <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-              <button onClick={saveEdit} style={{ ...btn, background: `${glow}22` }}>✓ 保存并重译</button>
-              <button onClick={() => { setEditId(null); setEditText(""); }} style={{ ...btn, color: "#94a3b8", borderColor: "rgba(255,255,255,0.15)" }}>取消</button>
-            </div>
+  const addSpeaker = () => setSpeakers(s => s.length >= 5 ? s : [...s, `话者 ${s.length + 1}`]);
+  const renameSpeaker = (i, v) => setSpeakers(s => s.map((x, idx) => idx === i ? v : x));
+  const removeSpeaker = (i) => {
+    if (speakers.length <= 1) return;
+    setSpeakers(s => s.filter((_, idx) => idx !== i));
+    setAssign(a => { const n = {}; for (const k in a) n[k] = a[k] === i ? 0 : a[k] > i ? a[k] - 1 : a[k]; return n; });
+    setCurrent(c => c === i ? 0 : c > i ? c - 1 : c);
+  };
+
+  // NOTE: inline function (not a nested <Component/>) so the edit textarea keeps
+  // its DOM identity across re-renders — otherwise the cursor jumps to the start.
+  const renderRow = ({ key, seg, ts, src, tr, pending, live }) => {
+    const si = live ? current : segSpk(seg);
+    return (
+      <div key={key} style={{ display: "flex", gap: 12, padding: "14px 16px", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+        <div style={{ width: 44, flexShrink: 0, fontSize: 11, color: "#64748b", paddingTop: 3 }}>{ts}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+            <span style={{ width: 10, height: 10, borderRadius: "50%", background: spColor(si), flexShrink: 0 }} />
+            {live ? (
+              <span style={{ fontSize: 12, color: "#94a3b8", fontWeight: 600 }}>{spName(si)}</span>
+            ) : (
+              <select value={si} onChange={e => setAssign(a => ({ ...a, [seg.id]: Number(e.target.value) }))}
+                style={{ background: "rgba(255,255,255,0.06)", color: spColor(si), border: `1px solid ${spColor(si)}55`, borderRadius: 6, fontSize: 12, fontWeight: 600, padding: "1px 4px", outline: "none", cursor: "pointer" }}>
+                {speakers.map((_, i) => <option key={i} value={i} style={{ color: "#000" }}>{spName(i)}</option>)}
+              </select>
+            )}
+            {live && <span style={{ fontSize: 10, color: glow }}>● 识别中</span>}
+            {!live && seg && editId !== seg.id && (
+              <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+                <button onClick={() => startEdit(seg)} title="修改识别文字" style={{ background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: 12 }}>✎</button>
+                {onDelete && <button onClick={() => onDelete(seg.id)} title="删除这段" style={{ background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: 12 }}>🗑</button>}
+              </span>
+            )}
           </div>
-        ) : (
-          <div style={{ fontSize: 15, color: live ? "#94a3b8" : "#f1f5f9", lineHeight: 1.6 }}>{src}{live && <span style={{ color: "#475569" }}>…</span>}</div>
-        )}
-        {!live && editId !== (seg && seg.id) && <div style={{ fontSize: 14, color: pending ? "#64748b" : "#a5b4fc", lineHeight: 1.6, marginTop: 4 }}>{pending ? "翻译中…" : tr}</div>}
+          {!live && seg && editId === seg.id ? (
+            <div>
+              <textarea autoFocus value={editText} onChange={e => setEditText(e.target.value)} rows={2}
+                onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) saveEdit(); if (e.key === "Escape") { setEditId(null); } }}
+                style={{ ...glass({ borderRadius: 8 }), width: "100%", boxSizing: "border-box", padding: 8, color: "#f1f5f9", fontSize: 15, lineHeight: 1.6, outline: "none", resize: "vertical", fontFamily: "system-ui" }} />
+              <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                <button onClick={saveEdit} style={{ ...btn, background: `${glow}22` }}>✓ 保存并重译</button>
+                <button onClick={() => { setEditId(null); setEditText(""); }} style={{ ...btn, color: "#94a3b8", borderColor: "rgba(255,255,255,0.15)" }}>取消</button>
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: 15, color: live ? "#94a3b8" : "#f1f5f9", lineHeight: 1.6 }}>{src}{live && <span style={{ color: "#475569" }}>…</span>}</div>
+          )}
+          {!live && editId !== (seg && seg.id) && <div style={{ fontSize: 14, color: pending ? "#64748b" : "#a5b4fc", lineHeight: 1.6, marginTop: 4 }}>{pending ? "翻译中…" : tr}</div>}
+        </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <div style={{ ...glass({ borderColor: `${glow}44` }), marginTop: 16, overflow: "hidden", boxShadow: `0 0 30px ${glow}22` }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: `${glow}18`, borderBottom: `1px solid ${glow}22`, flexWrap: "wrap", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 12, color: glow, fontWeight: 700 }}>{label}</span>
-          {editing ? (
-            <input autoFocus value={speaker} onChange={e => setSpeaker(e.target.value)} onBlur={() => setEditing(false)} onKeyDown={e => e.key === "Enter" && setEditing(false)}
-              style={{ ...glass({ borderRadius: 6 }), width: 96, padding: "2px 8px", color: "#f1f5f9", fontSize: 12, outline: "none" }} />
-          ) : (
-            <button onClick={() => setEditing(true)} style={{ ...btn, borderColor: "rgba(255,255,255,0.15)", color: "#94a3b8" }}>🗣 {name} ✎</button>
-          )}
+          <button onClick={() => setShowSpk(v => !v)} style={{ ...btn, borderColor: "rgba(255,255,255,0.15)", color: "#94a3b8" }}>👥 话者 ({speakers.length}) {showSpk ? "▲" : "▼"}</button>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           {transcript && <button onClick={download} style={btn}>↓ Download</button>}
@@ -446,6 +477,23 @@ function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete
           {onClear && <button onClick={onClear} style={{ ...btn, color: "#fb7185", borderColor: "#fb718544" }}>Clear</button>}
         </div>
       </div>
+
+      {showSpk && (
+        <div style={{ padding: "12px 14px", borderBottom: "1px solid rgba(255,255,255,0.08)", display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontSize: 11, color: "#64748b" }}>最多 5 个话者。点「当前」决定新段落默认归谁；每段也可在左侧下拉单独改。</div>
+          {speakers.map((n, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ width: 12, height: 12, borderRadius: "50%", background: spColor(i), flexShrink: 0 }} />
+              <input value={n} onChange={e => renameSpeaker(i, e.target.value)} placeholder={`话者 ${i + 1}`}
+                style={{ ...glass({ borderRadius: 6 }), flex: 1, minWidth: 0, padding: "4px 8px", color: "#f1f5f9", fontSize: 13, outline: "none" }} />
+              <button onClick={() => setCurrent(i)} style={{ ...btn, fontSize: 11, background: current === i ? `${glow}33` : "none", borderColor: current === i ? glow : "rgba(255,255,255,0.15)", color: current === i ? glow : "#94a3b8" }}>{current === i ? "✓ 当前" : "设为当前"}</button>
+              {speakers.length > 1 && <button onClick={() => removeSpeaker(i)} style={{ background: "none", border: "none", color: "#fb7185", cursor: "pointer", fontSize: 13 }}>✕</button>}
+            </div>
+          ))}
+          {speakers.length < 5 && <button onClick={addSpeaker} style={{ ...btn, alignSelf: "flex-start" }}>+ 添加话者</button>}
+        </div>
+      )}
+
       <div style={{ maxHeight: 420, overflowY: "auto" }}>
         {segments.map(seg => renderRow({ key: seg.id, seg, ts: fmt(seg.at), src: seg.src, tr: seg.tr, pending: seg.pending }))}
         {interim && renderRow({ key: "live", ts: fmt(Date.now()), src: interim, live: true })}
