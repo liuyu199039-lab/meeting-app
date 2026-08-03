@@ -221,7 +221,7 @@ function useSpeechRecognition({ lang, onResult, onEnd }) {
 // WebRTC (browser ↔ OpenAI direct, token minted by our backend). Gives real-time
 // transcription deltas + per-utterance completed transcripts. Same interface as
 // useSpeechRecognition. start() is async and throws if it can't connect.
-function useOpenAIRealtimeSTT({ language, onResult, onEnd }) {
+function useOpenAIRealtimeSTT({ language, onResult, onEnd, onError, onStatus }) {
   const [listening, setListening] = useState(false);
   const supported = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia
     && typeof window !== "undefined" && !!window.RTCPeerConnection;
@@ -229,10 +229,16 @@ function useOpenAIRealtimeSTT({ language, onResult, onEnd }) {
   const accRef = useRef("");
   const interimRef = useRef("");
   const pcRef = useRef(null), dcRef = useRef(null), streamRef = useRef(null);
+  const gotTextRef = useRef(false);
+  const seenRef = useRef(new Set());
+  const watchdogRef = useRef(null);
   const onResultRef = useRef(onResult); onResultRef.current = onResult;
   const onEndRef = useRef(onEnd); onEndRef.current = onEnd;
+  const onErrorRef = useRef(onError); onErrorRef.current = onError;
+  const onStatusRef = useRef(onStatus); onStatusRef.current = onStatus;
 
   const cleanup = useCallback(() => {
+    if (watchdogRef.current) { clearTimeout(watchdogRef.current); watchdogRef.current = null; }
     try { dcRef.current?.close(); } catch {}
     try { pcRef.current?.getSenders()?.forEach(s => s.track?.stop()); } catch {}
     try { pcRef.current?.close(); } catch {}
@@ -241,7 +247,7 @@ function useOpenAIRealtimeSTT({ language, onResult, onEnd }) {
   }, []);
 
   const start = useCallback(async () => {
-    accRef.current = ""; interimRef.current = "";
+    accRef.current = ""; interimRef.current = ""; gotTextRef.current = false; seenRef.current = new Set();
     // 1. ephemeral token
     const tr = await fetch("/api/openai-realtime-token", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -255,21 +261,48 @@ function useOpenAIRealtimeSTT({ language, onResult, onEnd }) {
     streamRef.current = stream;
     const pc = new RTCPeerConnection();
     pcRef.current = pc;
+    pc.oniceconnectionstatechange = () => {
+      const st = pc.iceConnectionState;
+      if (st === "failed" || st === "disconnected") onErrorRef.current?.("WebRTC 连接" + st);
+    };
     pc.addTrack(stream.getAudioTracks()[0], stream);
     const dc = pc.createDataChannel("oai-events");
     dcRef.current = dc;
+    dc.onopen = () => {
+      onStatusRef.current?.("✅ 已连接 OpenAI，请开始说话…");
+      // configure transcription over the channel too (belt & suspenders)
+      try {
+        dc.send(JSON.stringify({
+          type: "session.update",
+          session: { input_audio_transcription: { model: "gpt-4o-transcribe", language }, turn_detection: { type: "server_vad" } },
+        }));
+      } catch {}
+      // watchdog: if no transcription after 8s, report what events we DID see
+      watchdogRef.current = setTimeout(() => {
+        if (!gotTextRef.current) {
+          const types = [...seenRef.current].join(", ") || "（无任何事件）";
+          onStatusRef.current?.("⚠️ 已连接但没收到识别。收到的事件类型: " + types);
+        }
+      }, 8000);
+    };
     dc.onmessage = (e) => {
       let m; try { m = JSON.parse(e.data); } catch { return; }
+      if (m.type) seenRef.current.add(m.type);
+      if (m.type === "error") { onErrorRef.current?.("OpenAI: " + (m.error?.message || JSON.stringify(m.error || m).slice(0, 200))); return; }
       if (m.type === "conversation.item.input_audio_transcription.delta") {
+        gotTextRef.current = true;
         interimRef.current += m.delta || "";
         onResultRef.current({ interim: interimRef.current, accumulated: accRef.current, finalChunk: "" });
       } else if (m.type === "conversation.item.input_audio_transcription.completed") {
+        gotTextRef.current = true;
         const t = (m.transcript || "").trim();
         interimRef.current = "";
         if (t) {
           accRef.current += (accRef.current ? " " : "") + t;
           onResultRef.current({ interim: "", accumulated: accRef.current, finalChunk: t });
         }
+      } else if (m.type === "conversation.item.input_audio_transcription.failed") {
+        onErrorRef.current?.("转写失败: " + JSON.stringify(m.error || m).slice(0, 200));
       }
     };
 
@@ -897,16 +930,17 @@ function TranslatePage({ feature, onBack }) {
 
   const { segments, pendingText, onFinal, flush, reset, fullText, editSegment, deleteSegment } = useRollingTranslate(sys);
   const [liveTranscript, setLiveTranscript] = useState("");
+  const [status, setStatus] = useState("");
   const [engine, setEngine] = useState("free"); // "free" = Google, "pro" = OpenAI realtime
   const handleResult = ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); };
-  const rt = useOpenAIRealtimeSTT({ language: "ja", onResult: handleResult, onEnd: () => flush() });
+  const rt = useOpenAIRealtimeSTT({ language: "ja", onResult: handleResult, onEnd: () => flush(), onError: setError, onStatus: setStatus });
   const sr = useSpeechRecognition({ lang: "ja-JP", onResult: handleResult, onEnd: () => flush() });
   const active = engine === "pro" ? rt : sr;
   const { listening, supported, stop } = active;
 
   // keep prior transcripts across mic sessions — only clear interim/error
   const startLive = async () => {
-    setInterim(""); setError("");
+    setInterim(""); setError(""); setStatus("");
     if (engine === "pro") {
       try { await rt.start(); return; }
       catch (e) { setEngine("free"); setError("Pro(OpenAI)启动失败：" + e.message + "，已切到 Free。"); try { sr.start(); } catch {} return; }
@@ -939,6 +973,7 @@ function TranslatePage({ feature, onBack }) {
             </div>
           </div>
 
+          {engine === "pro" && listening && status && <div style={{ marginTop: 4, marginBottom: 8, color: "#94a3b8", fontSize: 12, textAlign: "center" }}>{status}</div>}
           <LiveFeed segments={segments} interim={(pendingText + interim).trim()} glow={feature.glow} label={`实时翻译 → ${targetLabel}`} onClear={!listening ? reset : undefined} onEditSrc={editSegment} onDelete={deleteSegment} onTranscript={setLiveTranscript} />
           {!listening && <SummarizeBlock text={fullText} transcript={liveTranscript} glow={feature.glow} gradient={feature.gradient} kind="meeting" />}
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
@@ -978,15 +1013,16 @@ function VideoTranslatePage({ feature, onBack }) {
   // mic mode → live rolling translation (English chunk → Chinese)
   const { segments, pendingText, onFinal, flush, reset, fullText, editSegment, deleteSegment } = useRollingTranslate(ZH_SYS);
   const [liveTranscript, setLiveTranscript] = useState("");
+  const [status, setStatus] = useState("");
   const [engine, setEngine] = useState("free");
   const handleResult = ({ interim, finalChunk }) => { setInterim(interim); onFinal(finalChunk); };
-  const rt = useOpenAIRealtimeSTT({ language: "en", onResult: handleResult, onEnd: () => flush() });
+  const rt = useOpenAIRealtimeSTT({ language: "en", onResult: handleResult, onEnd: () => flush(), onError: setError, onStatus: setStatus });
   const sr = useSpeechRecognition({ lang: "en-US", onResult: handleResult, onEnd: () => flush() });
   const active = engine === "pro" ? rt : sr;
   const { listening, supported, stop } = active;
   // keep prior transcripts across mic sessions — only clear interim/error
   const startLive = async () => {
-    setInterim(""); setError("");
+    setInterim(""); setError(""); setStatus("");
     if (engine === "pro") {
       try { await rt.start(); return; }
       catch (e) { setEngine("free"); setError("Pro(OpenAI)启动失败：" + e.message + "，已切到 Free。"); try { sr.start(); } catch {} return; }
@@ -1056,6 +1092,7 @@ function VideoTranslatePage({ feature, onBack }) {
           <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>
             💡 用于没有字幕的视频。桌面 Chrome 效果最佳；把声音外放对着麦克风。
           </div>
+          {engine === "pro" && listening && status && <div style={{ marginBottom: 8, color: "#94a3b8", fontSize: 12, textAlign: "center" }}>{status}</div>}
           <LiveFeed segments={segments} interim={(pendingText + interim).trim()} glow={feature.glow} label="🌏 实时翻译 → 中文" onClear={!listening ? reset : undefined} onEditSrc={editSegment} onDelete={deleteSegment} onTranscript={setLiveTranscript} />
           {!listening && <SummarizeBlock text={fullText} transcript={liveTranscript} glow={feature.glow} gradient={feature.gradient} kind="study" />}
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
