@@ -47,15 +47,20 @@ function cjkDateTime(d = new Date()) {
 // pull a "标题：xxx" line out of generated text, returning {title, body}
 function parseTitle(text, fallback) {
   const firstLine = text.split("\n").find(l => l.trim()) || "";
-  let title = firstLine.replace(/^[#\s]*标题[:：]?\s*/, "").replace(/^[#\s]+/, "").trim().slice(0, 20);
+  let title = firstLine.replace(/^[#\s]*(标题|タイトル|title)\s*[:：]?\s*/i, "").replace(/^[#\s]+/, "").trim().slice(0, 20);
   if (!title) title = fallback;
-  const body = text.replace(/^.*标题[:：].*\n/, "").trim() || text;
+  const body = text.replace(/^.*?(标题|タイトル|title)\s*[:：].*\n/i, "").trim() || text;
   return { title, body };
 }
-const NOTE_SYS = {
-  study: `你是专业学习笔记助手。根据这次学习的内容，生成【简明扼要、只抓重点】的中文笔记。第一行输出 "标题：" 加不超过15字概括主题的标题，空一行后用精炼的分条要点（每条一句话），只保留最关键的知识点和结论，难点用★标注，去掉冗余和客套，不要长段落。`,
-  meeting: `你是专业会议秘书。根据这次会议的内容，生成【简明扼要】的中文会议记录。第一行输出 "标题：" 加不超过15字概括会议主题的标题，空一行后按以下结构分条精炼列出：\n【核心议题】\n【决策结果】\n【行动项】（含负责人、截止时间，如有提及）\n【待跟进】\n只保留关键信息，去掉寒暄和无关内容。`,
-};
+const LANGS = [{ v: "ja", l: "日本語" }, { v: "zh", l: "中文" }, { v: "en", l: "English" }];
+// build the summarize system prompt for a kind ("study"/"meeting") in a target language
+function noteSys(kind, lang) {
+  const L = { zh: "简体中文", ja: "日本語", en: "English" }[lang] || "简体中文";
+  const titleRule = `第一行务必以 "标题：" 开头（"标题："这两个字保持中文，方便程序解析），后面接不超过15字、用${L}写的标题；然后空一行再写正文。`;
+  if (kind === "meeting")
+    return `你是专业会议秘书。根据这次会议内容，生成【简明扼要】的会议记录，正文（含小标题）全部用${L}书写。${titleRule}正文按以下结构分条精炼列出（小标题用${L}）：核心议题 / 决策结果 / 行动项（含负责人、截止时间，如有提及）/ 待跟进。只保留关键信息，去掉寒暄和无关内容。`;
+  return `你是专业学习笔记助手。根据内容生成【简明扼要、只抓重点】的笔记，正文全部用${L}书写。${titleRule}正文用精炼的分条要点（每条一句话），只保留最关键的知识点和结论，难点用★标注，去掉冗余，不要长段落。`;
+}
 
 // ── Feature definitions ──────────────────────────────────────
 const FEATURES = [
@@ -523,6 +528,7 @@ function SummarizeBlock({ text, transcript, glow, gradient, kind }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+  const [lang, setLang] = useState(kind === "meeting" ? "ja" : "zh"); // meeting → Japanese by default
   if (!text || !text.trim()) return null;
 
   const isMeeting = kind === "meeting";
@@ -533,7 +539,10 @@ function SummarizeBlock({ text, transcript, glow, gradient, kind }) {
   const summarize = async () => {
     setError(""); setLoading(true); setSaved(false);
     try {
-      const result = await callClaude(text, NOTE_SYS[kind]);
+      // summarize from the original transcript (has the source language) when we have it —
+      // so e.g. Japanese minutes come from the Japanese original, not a back-translation
+      const source = (transcript || "").trim() || text;
+      const result = await callClaude(source, noteSys(kind, lang));
       setNotes(result);
       const { title, body } = parseTitle(result, isMeeting ? "会议记录" : "学习笔记");
       const now = new Date();
@@ -557,6 +566,12 @@ function SummarizeBlock({ text, transcript, glow, gradient, kind }) {
 
   return (
     <div style={{ marginTop: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 11, color: "#64748b" }}>记录语言:</span>
+        {LANGS.map(t => (
+          <button key={t.v} onClick={() => setLang(t.v)} style={{ ...glass({ borderRadius: 999 }), padding: "4px 12px", fontSize: 12, cursor: "pointer", background: lang === t.v ? `${glow}33` : "rgba(255,255,255,0.045)", borderColor: lang === t.v ? glow : "rgba(255,255,255,0.09)", color: lang === t.v ? glow : "#94a3b8", fontWeight: 600 }}>{t.l}</button>
+        ))}
+      </div>
       <ActionBtn onClick={summarize} loading={loading} disabled={false} gradient={gradient}>{btnLabel}</ActionBtn>
       {saved && <div style={{ marginTop: 10, color: "#34d399", fontSize: 12 }}>✓ 已保存到 {savedTo}</div>}
       {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
@@ -594,12 +609,13 @@ function NotesLibrary({ feature, kind }) {
   const [output, setOutput] = useState("");
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState("");
+  const [lang, setLang] = useState(kind === "meeting" ? "ja" : "zh");
 
   const run = async () => {
     if (!input.trim()) return;
     setError(""); setProcessing(true);
     try {
-      const result = await callClaude(input, NOTE_SYS[kind]);
+      const result = await callClaude(input, noteSys(kind, lang));
       setOutput(result);
       const { title, body } = parseTitle(result, isMeeting ? "会议记录" : "学习笔记");
       const now = new Date();
@@ -720,6 +736,12 @@ function NotesLibrary({ feature, kind }) {
       ) : (
         <>
           <TextInput value={input} onChange={setInput} label={isMeeting ? "粘贴会议内容（日文/中文）" : "粘贴学习内容（字幕、教材、课堂记录…）"} placeholder={isMeeting ? "Paste meeting content..." : "Paste study content..."} accent={feature.glow} rows={7} />
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 11, color: "#64748b" }}>记录语言:</span>
+            {LANGS.map(t => (
+              <button key={t.v} onClick={() => setLang(t.v)} style={{ ...glass({ borderRadius: 999 }), padding: "4px 12px", fontSize: 12, cursor: "pointer", background: lang === t.v ? `${feature.glow}33` : "rgba(255,255,255,0.045)", borderColor: lang === t.v ? feature.glow : "rgba(255,255,255,0.09)", color: lang === t.v ? feature.glow : "#94a3b8", fontWeight: 600 }}>{t.l}</button>
+            ))}
+          </div>
           <ActionBtn onClick={run} loading={processing} disabled={!input.trim()} gradient={feature.gradient}>{isMeeting ? "📋 Generate & save" : "📚 Generate & save"}</ActionBtn>
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
           {output && <ResultBox content={output} label={`${isMeeting ? "📋 Meeting Minutes" : "📚 Study Notes"}（已保存）`} accent={feature.glow} />}
