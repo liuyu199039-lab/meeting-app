@@ -1105,30 +1105,26 @@ function StudyNotesPage({ feature, onBack }) {
   );
 }
 
-// Knowledge Digest — pulls all saved study notes (and optionally meeting minutes)
-// and asks the AI to distill + categorize them into an organized knowledge map.
-// start of the current week (Monday 00:00, local time)
-function weekStart() {
+// start of a week (Monday 00:00 local); offset in weeks back from the current week
+function weekStart(offset = 0) {
   const d = new Date();
   const day = (d.getDay() + 6) % 7; // 0 = Monday
   d.setHours(0, 0, 0, 0);
-  d.setDate(d.getDate() - day);
+  d.setDate(d.getDate() - day - offset * 7);
   return d;
 }
+const md = (d) => `${d.getMonth() + 1}/${d.getDate()}`;
 
 function WeeklyReportPage({ feature, onBack }) {
-  const [type, setType] = useState("work"); // "work" (会议→日语周报) | "study" (学习→周报)
+  const [type, setType] = useState("work"); // "work" = meeting → JA report | "study" = notes → report
+  const [weekOffset, setWeekOffset] = useState(0); // 0 = this week, 1 = last week, ...
   const [output, setOutput] = useState("");
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState("");
-  const [counts, setCounts] = useState({ study: 0, meeting: 0 });
-
-  const ws = weekStart();
-  const inWeek = (kind) => loadNotes(kind).filter(n => { try { return new Date(n.date) >= ws; } catch { return false; } });
+  const [tick, setTick] = useState(0); // bump to re-read storage
 
   useEffect(() => {
-    const refresh = () => setCounts({ study: inWeek("study").length, meeting: inWeek("meeting").length });
-    refresh();
+    const refresh = () => setTick(t => t + 1);
     window.addEventListener("study-notes-changed", refresh);
     window.addEventListener("meeting-notes-changed", refresh);
     window.addEventListener("focus", refresh);
@@ -1139,19 +1135,31 @@ function WeeklyReportPage({ feature, onBack }) {
     };
   }, []);
 
+  const ws = weekStart(weekOffset);
+  const we = new Date(ws); we.setDate(we.getDate() + 7); // exclusive end
+  const inWeek = (kind) => loadNotes(kind).filter(n => { try { const t = new Date(n.date); return t >= ws && t < we; } catch { return false; } });
+  const counts = { study: inWeek("study").length, meeting: inWeek("meeting").length }; // eslint-disable-line
+  void tick; // counts depend on storage; tick forces refresh
+
   const kind = type === "work" ? "meeting" : "study";
   const available = counts[kind];
-  const weekLabel = `${ws.getMonth() + 1}/${ws.getDate()} – today`;
+  const sunday = new Date(we); sunday.setDate(sunday.getDate() - 1);
+  const rangeLabel = weekOffset === 0 ? `${md(ws)} – today` : `${md(ws)} – ${md(sunday)}`;
+  const weekOptions = Array.from({ length: 8 }, (_, i) => {
+    const s = weekStart(i); const e = new Date(s); e.setDate(e.getDate() + 6);
+    const label = i === 0 ? `This week (${md(s)} – today)` : i === 1 ? `Last week (${md(s)} – ${md(e)})` : `${i} weeks ago (${md(s)} – ${md(e)})`;
+    return { i, label };
+  });
 
   const generate = async () => {
     const notes = inWeek(kind);
-    if (!notes.length) { setError(type === "work" ? "No meeting minutes this week." : "No study notes this week."); return; }
+    if (!notes.length) { setError(type === "work" ? "No meeting minutes in this week." : "No study notes in this week."); return; }
     const text = notes.slice().reverse().map(n => `【${n.title}】\n${n.content}`).join("\n\n---\n\n");
     setError(""); setProcessing(true);
     try {
       const sys = type === "work"
-        ? `あなたは顧客向けの週次報告書を作成するプロのアシスタントです。以下は今週の会議記録（日本語）です。これらをもとに、顧客にそのまま提出できる丁寧で簡潔な【週次報告書】を日本語で作成してください。構成：\n■ 今週のサマリー（2〜3文）\n■ 主な議題・決定事項（箇条書き）\n■ 進捗・成果\n■ 次週の予定・課題\nビジネス敬語で、顧客が読める体裁に整え、冗長な部分や社内的な雑談は省いてください。`
-        : `你是学习总结助手。以下是本周的学习笔记。请生成一份【本周学习周报】（中文）：\n■ 本周学习概览（2-3句）\n■ 核心要点（按主题分类、分条列出，合并重复）\n■ 难点/易错点（★标注）\n■ 下周建议 / 待巩固\n精炼、条理清晰，不要照抄原文。`;
+        ? `あなたは顧客向けの週次報告書を作成するプロのアシスタントです。以下はその週の会議記録（日本語）です。これらをもとに、顧客にそのまま提出できる丁寧で簡潔な【週次報告書】を日本語で作成してください。構成：\n■ 今週のサマリー（2〜3文）\n■ 主な議題・決定事項（箇条書き）\n■ 進捗・成果\n■ 次週の予定・課題\nビジネス敬語で、顧客が読める体裁に整え、冗長な部分や社内的な雑談は省いてください。`
+        : `你是学习总结助手。以下是那一周的学习笔记。请生成一份【学习周报】（中文）：\n■ 本周学习概览（2-3句）\n■ 核心要点（按主题分类、分条列出，合并重复）\n■ 难点/易错点（★标注）\n■ 下周建议 / 待巩固\n精炼、条理清晰，不要照抄原文。`;
       const result = await callClaude(text, sys);
       setOutput(result);
     } catch (e) { setError("Generation failed: " + e.message); }
@@ -1166,16 +1174,22 @@ function WeeklyReportPage({ feature, onBack }) {
   const saveReport = () => {
     if (!output.trim()) return;
     const now = new Date();
-    const title = `${cjkDateTime(now)} ${type === "work" ? "週次報告" : "学习周报"}`;
+    const title = `${cjkDateTime(now)} ${type === "work" ? "週次報告" : "学习周报"} (${rangeLabel})`;
     addNote(kind, { id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), title, date: now.toISOString(), content: output });
-    setCounts({ study: inWeek("study").length, meeting: inWeek("meeting").length });
+    setTick(t => t + 1);
   };
 
   return (
     <PageShell feature={feature} onBack={onBack}>
       <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 14, lineHeight: 1.6 }}>
-        Auto-summarize <strong style={{ color: "#e2e8f0" }}>this week</strong>'s records into a weekly report. <span style={{ color: "#64748b" }}>(This week: {weekLabel})</span>
+        Auto-summarize a week's records into a weekly report.
       </div>
+
+      <div style={{ fontSize: 12, color: "#64748b", marginBottom: 8 }}>Week</div>
+      <select value={weekOffset} onChange={e => { setWeekOffset(Number(e.target.value)); setOutput(""); setError(""); }}
+        style={{ ...glass({ borderRadius: 10 }), width: "100%", boxSizing: "border-box", padding: "9px 12px", color: "#f1f5f9", fontSize: 13, outline: "none", marginBottom: 16, cursor: "pointer" }}>
+        {weekOptions.map(o => <option key={o.i} value={o.i} style={{ color: "#000" }}>{o.label}</option>)}
+      </select>
 
       <div style={{ fontSize: 12, color: "#64748b", marginBottom: 8 }}>Report type</div>
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
@@ -1184,11 +1198,11 @@ function WeeklyReportPage({ feature, onBack }) {
         ))}
       </div>
       <div style={{ fontSize: 11, color: "#64748b", marginBottom: 14 }}>
-        {type === "work" ? "Generates a client-ready weekly report in Japanese from this week\u2019s meeting minutes." : "Generates a study summary & key points in Chinese from this week\u2019s notes."}
+        {type === "work" ? "Generates a client-ready weekly report in Japanese from the selected week\u2019s meeting minutes." : "Generates a study summary & key points in Chinese from the selected week\u2019s notes."} <span style={{ color: "#475569" }}>({rangeLabel})</span>
       </div>
 
       <ActionBtn onClick={generate} loading={processing} disabled={!available} gradient={feature.gradient}>📊 Generate report</ActionBtn>
-      {!available && <div style={{ marginTop: 12, color: "#64748b", fontSize: 12 }}>Nothing this week yet ({type === "work" ? "meeting minutes" : "study notes"}). Record some first, then come back.</div>}
+      {!available && <div style={{ marginTop: 12, color: "#64748b", fontSize: 12 }}>No {type === "work" ? "meeting minutes" : "study notes"} in this week ({rangeLabel}). Pick another week or record some.</div>}
       {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
       {processing && <div style={{ textAlign: "center", padding: 20, color: feature.glow, fontSize: 13 }}>⏳ Generating report…</div>}
       {output && !processing && (
