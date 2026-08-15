@@ -18,7 +18,7 @@ async function callClaude(userMsg, systemMsg) {
 
 // ── Notes stores (persisted in localStorage) ─────────────────
 // Two libraries: "study" (Study Notes) and "meeting" (Meeting Minutes).
-const STORE_KEYS = { study: "studyNotes_v1", meeting: "meetingMinutes_v1" };
+const STORE_KEYS = { study: "studyNotes_v1", meeting: "meetingMinutes_v1", report: "weeklyReports_v1" };
 const storeEvent = (kind) => `${kind}-notes-changed`;
 function loadNotes(kind) {
   try { return JSON.parse(localStorage.getItem(STORE_KEYS[kind]) || "[]"); } catch { return []; }
@@ -1116,24 +1116,20 @@ function weekStart(offset = 0) {
 const md = (d) => `${d.getMonth() + 1}/${d.getDate()}`;
 
 function WeeklyReportPage({ feature, onBack }) {
+  const [tab, setTab] = useState("new"); // "new" | "saved"
   const [type, setType] = useState("work"); // "work" = meeting → JA report | "study" = notes → report
   const [weekOffset, setWeekOffset] = useState(0); // 0 = this week, 1 = last week, ...
   const [output, setOutput] = useState("");
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+  const [openId, setOpenId] = useState(null);
   const [tick, setTick] = useState(0); // bump to re-read storage
 
   useEffect(() => {
     const refresh = () => setTick(t => t + 1);
-    window.addEventListener("study-notes-changed", refresh);
-    window.addEventListener("meeting-notes-changed", refresh);
-    window.addEventListener("focus", refresh);
-    return () => {
-      window.removeEventListener("study-notes-changed", refresh);
-      window.removeEventListener("meeting-notes-changed", refresh);
-      window.removeEventListener("focus", refresh);
-    };
+    ["study-notes-changed", "meeting-notes-changed", "report-notes-changed", "focus"].forEach(ev => window.addEventListener(ev, refresh));
+    return () => ["study-notes-changed", "meeting-notes-changed", "report-notes-changed", "focus"].forEach(ev => window.removeEventListener(ev, refresh));
   }, []);
 
   const ws = weekStart(weekOffset);
@@ -1176,18 +1172,31 @@ function WeeklyReportPage({ feature, onBack }) {
     if (!output.trim()) return;
     const now = new Date();
     const title = `${cjkDateTime(now)} ${type === "work" ? "週次報告" : "学习周报"} (${rangeLabel})`;
-    addNote(kind, { id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), title, date: now.toISOString(), content: output });
+    addNote("report", { id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), title, date: now.toISOString(), content: output });
     setTick(t => t + 1);
     setSaved(true);
   };
-  const savedTo = type === "work" ? "Meeting Minutes" : "Study Notes";
+
+  // saved weekly reports (own store)
+  const reports = loadNotes("report");
+  const fmtDate = (iso) => { try { return new Date(iso).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }); } catch { return ""; } };
+  const delReport = (id) => { removeNote("report", id); setTick(t => t + 1); if (openId === id) setOpenId(null); };
+  const dlReport = (n) => {
+    const blob = new Blob([`${n.title}\n\n${n.content}`], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = `${n.title}.txt`; a.click();
+  };
 
   return (
     <PageShell feature={feature} onBack={onBack}>
-      <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 14, lineHeight: 1.6 }}>
-        Auto-summarize a week's records into a weekly report.
+      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+        {[{ v: "new", l: "✏️ New report" }, { v: "saved", l: `📁 Saved (${reports.length})` }].map(t => (
+          <button key={t.v} onClick={() => setTab(t.v)} style={{ ...glass({ borderRadius: 12 }), padding: "8px 18px", fontSize: 13, cursor: "pointer", background: tab === t.v ? `${feature.glow}33` : "rgba(255,255,255,0.045)", borderColor: tab === t.v ? feature.glow : "rgba(255,255,255,0.09)", color: tab === t.v ? feature.glow : "#94a3b8", fontWeight: 600 }}>{t.l}</button>
+        ))}
       </div>
 
+      {tab === "new" ? (
+        <>
       <div style={{ fontSize: 12, color: "#64748b", marginBottom: 8 }}>Week</div>
       <select value={weekOffset} onChange={e => { setWeekOffset(Number(e.target.value)); setOutput(""); setError(""); }}
         style={{ ...glass({ borderRadius: 10 }), width: "100%", boxSizing: "border-box", padding: "9px 12px", color: "#f1f5f9", fontSize: 13, outline: "none", marginBottom: 16, cursor: "pointer" }}>
@@ -1213,9 +1222,40 @@ function WeeklyReportPage({ feature, onBack }) {
           <ResultBox content={output} label={type === "work" ? "📊 Weekly Report (JA)" : "📊 Weekly Report"} accent={feature.glow} onDownload={download} />
           <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 10 }}>
             <button onClick={saveReport} disabled={saved} style={{ ...glass({ borderRadius: 8 }), padding: "6px 14px", fontSize: 12, color: saved ? "#64748b" : feature.glow, borderColor: saved ? "rgba(255,255,255,0.09)" : `${feature.glow}44`, cursor: saved ? "default" : "pointer" }}>💾 Save report</button>
-            {saved && <span style={{ color: "#34d399", fontSize: 12 }}>✓ Saved to {savedTo}</span>}
+            {saved && <span style={{ color: "#34d399", fontSize: 12 }}>✓ Saved — see the “Saved” tab</span>}
           </div>
         </>
+      )}
+        </>
+      ) : (
+        reports.length === 0 ? (
+          <div style={{ ...glass({ borderRadius: 14 }), padding: "40px 20px", textAlign: "center", color: "#64748b", fontSize: 13, lineHeight: 1.8 }}>No saved reports yet. Generate one in the “New report” tab and tap 💾 Save report.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {reports.map(n => (
+              <div key={n.id} style={{ ...glass({ borderRadius: 14, borderColor: openId === n.id ? `${feature.glow}55` : "rgba(255,255,255,0.09)" }), overflow: "hidden" }}>
+                <div onClick={() => setOpenId(openId === n.id ? null : n.id)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 16px", cursor: "pointer" }}>
+                  <div style={{ width: 36, height: 36, borderRadius: 10, background: feature.gradient, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}>📊</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: "#f1f5f9", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{n.title}</div>
+                    <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>{fmtDate(n.date)}</div>
+                  </div>
+                  <span style={{ color: "#64748b", fontSize: 13 }}>{openId === n.id ? "▲" : "▼"}</span>
+                </div>
+                {openId === n.id && (
+                  <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)" }}>
+                    <pre style={{ margin: 0, padding: 16, color: "#cbd5e1", fontSize: 14, lineHeight: 1.8, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "system-ui" }}>{n.content}</pre>
+                    <div style={{ display: "flex", gap: 8, padding: "0 16px 14px" }}>
+                      <button onClick={() => navigator.clipboard.writeText(n.content)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>Copy</button>
+                      <button onClick={() => dlReport(n)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>↓ Download</button>
+                      <button onClick={() => delReport(n.id)} style={{ background: "none", border: "1px solid #fb718544", color: "#fb7185", borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>Delete</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )
       )}
     </PageShell>
   );
