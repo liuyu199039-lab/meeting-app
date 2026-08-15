@@ -116,9 +116,9 @@ const FEATURES = [
   },
   {
     id: "vocab",
-    icon: "🗂️",
-    title: "Knowledge\nDigest",
-    desc: "汇总分类你的学习笔记",
+    icon: "📊",
+    title: "Weekly\nReport",
+    desc: "本周工作 / 学习周报",
     gradient: "linear-gradient(135deg, #06b6d4 0%, #67e8f9 100%)",
     glow: "#06b6d4",
     tag: "learning",
@@ -270,13 +270,8 @@ function useOpenAIRealtimeSTT({ language, onResult, onEnd, onError, onStatus }) 
     dcRef.current = dc;
     dc.onopen = () => {
       onStatusRef.current?.("✅ 已连接 OpenAI，请开始说话…");
-      // configure transcription over the channel too (belt & suspenders)
-      try {
-        dc.send(JSON.stringify({
-          type: "session.update",
-          session: { input_audio_transcription: { model: "gpt-4o-transcribe", language }, turn_detection: { type: "server_vad" } },
-        }));
-      } catch {}
+      // (transcription is already configured when the ephemeral token is created,
+      //  so no session.update is needed here)
       // watchdog: if no transcription after 8s, report what events we DID see
       watchdogRef.current = setTimeout(() => {
         if (!gotTextRef.current) {
@@ -1112,15 +1107,27 @@ function StudyNotesPage({ feature, onBack }) {
 
 // Knowledge Digest — pulls all saved study notes (and optionally meeting minutes)
 // and asks the AI to distill + categorize them into an organized knowledge map.
-function KnowledgeDigestPage({ feature, onBack }) {
-  const [src, setSrc] = useState("study"); // "study" | "meeting" | "both"
+// start of the current week (Monday 00:00, local time)
+function weekStart() {
+  const d = new Date();
+  const day = (d.getDay() + 6) % 7; // 0 = Monday
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - day);
+  return d;
+}
+
+function WeeklyReportPage({ feature, onBack }) {
+  const [type, setType] = useState("work"); // "work" (会议→日语周报) | "study" (学习→周报)
   const [output, setOutput] = useState("");
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState("");
   const [counts, setCounts] = useState({ study: 0, meeting: 0 });
 
+  const ws = weekStart();
+  const inWeek = (kind) => loadNotes(kind).filter(n => { try { return new Date(n.date) >= ws; } catch { return false; } });
+
   useEffect(() => {
-    const refresh = () => setCounts({ study: loadNotes("study").length, meeting: loadNotes("meeting").length });
+    const refresh = () => setCounts({ study: inWeek("study").length, meeting: inWeek("meeting").length });
     refresh();
     window.addEventListener("study-notes-changed", refresh);
     window.addEventListener("meeting-notes-changed", refresh);
@@ -1132,57 +1139,63 @@ function KnowledgeDigestPage({ feature, onBack }) {
     };
   }, []);
 
-  const gather = () => {
-    const kinds = src === "both" ? ["study", "meeting"] : [src];
-    return kinds.flatMap(k => loadNotes(k)).map(n => `【${n.title}】\n${n.content}`).join("\n\n---\n\n");
-  };
-  const available = (src === "both" ? counts.study + counts.meeting : counts[src]);
+  const kind = type === "work" ? "meeting" : "study";
+  const available = counts[kind];
+  const weekLabel = `${ws.getMonth() + 1}月${ws.getDate()}日〜今天`;
 
-  const organize = async () => {
-    const text = gather();
-    if (!text.trim()) { setError("还没有可整理的笔记。先去生成一些学习笔记/会议记录。"); return; }
+  const generate = async () => {
+    const notes = inWeek(kind);
+    if (!notes.length) { setError(type === "work" ? "本周还没有会议记录。" : "本周还没有学习笔记。"); return; }
+    const text = notes.slice().reverse().map(n => `【${n.title}】\n${n.content}`).join("\n\n---\n\n");
     setError(""); setProcessing(true);
     try {
-      const sys = `你是学习知识管理专家。下面是用户零散的多篇笔记。请把里面的知识点【提炼 + 分类整理】成一份条理清晰的中文知识地图：\n1. 先自动归纳出几个大类（按主题/领域），每个大类给一个简短标题\n2. 每个大类下用精炼的分条列出核心知识点（合并重复、去掉冗余、每条一句话）\n3. 重点/难点用 ★ 标注\n4. 最后加一段【知识关联】，说明不同主题之间的联系\n输出结构化、精炼，不要照抄原文。`;
+      const sys = type === "work"
+        ? `あなたは顧客向けの週次報告書を作成するプロのアシスタントです。以下は今週の会議記録（日本語）です。これらをもとに、顧客にそのまま提出できる丁寧で簡潔な【週次報告書】を日本語で作成してください。構成：\n■ 今週のサマリー（2〜3文）\n■ 主な議題・決定事項（箇条書き）\n■ 進捗・成果\n■ 次週の予定・課題\nビジネス敬語で、顧客が読める体裁に整え、冗長な部分や社内的な雑談は省いてください。`
+        : `你是学习总结助手。以下是本周的学习笔记。请生成一份【本周学习周报】（中文）：\n■ 本周学习概览（2-3句）\n■ 核心要点（按主题分类、分条列出，合并重复）\n■ 难点/易错点（★标注）\n■ 下周建议 / 待巩固\n精炼、条理清晰，不要照抄原文。`;
       const result = await callClaude(text, sys);
       setOutput(result);
-    } catch (e) { setError("整理失败: " + e.message); }
+    } catch (e) { setError("生成失败: " + e.message); }
     setProcessing(false);
   };
 
   const download = () => {
     const blob = new Blob([output], { type: "text/plain;charset=utf-8" });
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-    a.download = `knowledge_digest_${new Date().toLocaleDateString("en-CA")}.txt`; a.click();
+    a.download = `weekly_report_${type}_${new Date().toLocaleDateString("en-CA")}.txt`; a.click();
   };
-  const saveAsNote = () => {
+  const saveReport = () => {
     if (!output.trim()) return;
-    addNote("study", { id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), title: "知识地图 " + new Date().toLocaleDateString("zh-CN"), date: new Date().toISOString(), content: output });
-    setCounts({ study: loadNotes("study").length, meeting: loadNotes("meeting").length });
+    const now = new Date();
+    const title = `${cjkDateTime(now)} ${type === "work" ? "週次報告" : "学习周报"}`;
+    addNote(kind, { id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), title, date: now.toISOString(), content: output });
+    setCounts({ study: inWeek("study").length, meeting: inWeek("meeting").length });
   };
 
   return (
     <PageShell feature={feature} onBack={onBack}>
       <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 14, lineHeight: 1.6 }}>
-        把你散落的笔记自动<strong style={{ color: "#e2e8f0" }}>提炼 + 分类</strong>成一张知识地图。
+        自动汇总<strong style={{ color: "#e2e8f0" }}>本周</strong>的记录，生成一份周报。<span style={{ color: "#64748b" }}>（本周：{weekLabel}）</span>
       </div>
 
-      <div style={{ fontSize: 12, color: "#64748b", marginBottom: 8 }}>整理来源</div>
+      <div style={{ fontSize: 12, color: "#64748b", marginBottom: 8 }}>周报类型</div>
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        {[{ v: "study", l: `📚 学习笔记 (${counts.study})` }, { v: "meeting", l: `📋 会议记录 (${counts.meeting})` }, { v: "both", l: "全部" }].map(t => (
-          <button key={t.v} onClick={() => setSrc(t.v)} style={{ ...glass({ borderRadius: 10 }), padding: "7px 14px", fontSize: 12, cursor: "pointer", background: src === t.v ? `${feature.glow}33` : "rgba(255,255,255,0.045)", borderColor: src === t.v ? feature.glow : "rgba(255,255,255,0.09)", color: src === t.v ? feature.glow : "#94a3b8" }}>{t.l}</button>
+        {[{ v: "work", l: `💼 工作周报（会议记录 ${counts.meeting}）` }, { v: "study", l: `📚 学习周报（学习笔记 ${counts.study}）` }].map(t => (
+          <button key={t.v} onClick={() => { setType(t.v); setOutput(""); setError(""); }} style={{ ...glass({ borderRadius: 10 }), padding: "7px 14px", fontSize: 12, cursor: "pointer", background: type === t.v ? `${feature.glow}33` : "rgba(255,255,255,0.045)", borderColor: type === t.v ? feature.glow : "rgba(255,255,255,0.09)", color: type === t.v ? feature.glow : "#94a3b8" }}>{t.l}</button>
         ))}
       </div>
+      <div style={{ fontSize: 11, color: "#64748b", marginBottom: 14 }}>
+        {type === "work" ? "从本周会议记录生成可提交给客户的日语周报（日本語）。" : "从本周学习笔记生成学习总结和要点（中文）。"}
+      </div>
 
-      <ActionBtn onClick={organize} loading={processing} disabled={!available} gradient={feature.gradient}>🗂️ 整理知识点</ActionBtn>
-      {!available && <div style={{ marginTop: 12, color: "#64748b", fontSize: 12 }}>暂无笔记。去 Live Translate / Video 翻译后点「Summarize」生成笔记，再回来整理。</div>}
+      <ActionBtn onClick={generate} loading={processing} disabled={!available} gradient={feature.gradient}>📊 生成周报</ActionBtn>
+      {!available && <div style={{ marginTop: 12, color: "#64748b", fontSize: 12 }}>本周还没有{type === "work" ? "会议记录" : "学习笔记"}。先去记录一些，再回来生成周报。</div>}
       {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
-      {processing && <div style={{ textAlign: "center", padding: 20, color: feature.glow, fontSize: 13 }}>⏳ 正在提炼分类…</div>}
+      {processing && <div style={{ textAlign: "center", padding: 20, color: feature.glow, fontSize: 13 }}>⏳ 正在生成周报…</div>}
       {output && !processing && (
         <>
-          <ResultBox content={output} label="🗂️ 知识地图" accent={feature.glow} onDownload={download} />
+          <ResultBox content={output} label={type === "work" ? "📊 週次報告" : "📊 学习周报"} accent={feature.glow} onDownload={download} />
           <div style={{ marginTop: 10 }}>
-            <button onClick={saveAsNote} style={{ ...glass({ borderRadius: 8 }), padding: "6px 14px", fontSize: 12, color: feature.glow, borderColor: `${feature.glow}44`, cursor: "pointer" }}>💾 保存为一条笔记</button>
+            <button onClick={saveReport} style={{ ...glass({ borderRadius: 8 }), padding: "6px 14px", fontSize: 12, color: feature.glow, borderColor: `${feature.glow}44`, cursor: "pointer" }}>💾 保存周报</button>
           </div>
         </>
       )}
@@ -1264,7 +1277,7 @@ export default function App() {
     case "meeting-notes": page = <MeetingNotesPage feature={feature} onBack={back} />; break;
     case "video-zh": page = <VideoTranslatePage feature={feature} onBack={back} />; break;
     case "study-notes": page = <StudyNotesPage feature={feature} onBack={back} />; break;
-    case "vocab": page = <KnowledgeDigestPage feature={feature} onBack={back} />; break;
+    case "vocab": page = <WeeklyReportPage feature={feature} onBack={back} />; break;
     default: page = <HomeScreen onSelect={setCurrent} />;
   }
 
