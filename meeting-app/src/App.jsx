@@ -1121,6 +1121,7 @@ function WeeklyReportPage({ feature, onBack }) {
   const [output, setOutput] = useState("");
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
   const [tick, setTick] = useState(0); // bump to re-read storage
 
   useEffect(() => {
@@ -1155,7 +1156,7 @@ function WeeklyReportPage({ feature, onBack }) {
     const notes = inWeek(kind);
     if (!notes.length) { setError(type === "work" ? "No meeting minutes in this week." : "No study notes in this week."); return; }
     const text = notes.slice().reverse().map(n => `【${n.title}】\n${n.content}`).join("\n\n---\n\n");
-    setError(""); setProcessing(true);
+    setError(""); setSaved(false); setProcessing(true);
     try {
       const sys = type === "work"
         ? `あなたは顧客向けの週次報告書を作成するプロのアシスタントです。以下はその週の会議記録（日本語）です。これらをもとに、顧客にそのまま提出できる丁寧で簡潔な【週次報告書】を日本語で作成してください。構成：\n■ 今週のサマリー（2〜3文）\n■ 主な議題・決定事項（箇条書き）\n■ 進捗・成果\n■ 次週の予定・課題\nビジネス敬語で、顧客が読める体裁に整え、冗長な部分や社内的な雑談は省いてください。`
@@ -1177,7 +1178,9 @@ function WeeklyReportPage({ feature, onBack }) {
     const title = `${cjkDateTime(now)} ${type === "work" ? "週次報告" : "学习周报"} (${rangeLabel})`;
     addNote(kind, { id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), title, date: now.toISOString(), content: output });
     setTick(t => t + 1);
+    setSaved(true);
   };
+  const savedTo = type === "work" ? "Meeting Minutes" : "Study Notes";
 
   return (
     <PageShell feature={feature} onBack={onBack}>
@@ -1208,8 +1211,9 @@ function WeeklyReportPage({ feature, onBack }) {
       {output && !processing && (
         <>
           <ResultBox content={output} label={type === "work" ? "📊 Weekly Report (JA)" : "📊 Weekly Report"} accent={feature.glow} onDownload={download} />
-          <div style={{ marginTop: 10 }}>
-            <button onClick={saveReport} style={{ ...glass({ borderRadius: 8 }), padding: "6px 14px", fontSize: 12, color: feature.glow, borderColor: `${feature.glow}44`, cursor: "pointer" }}>💾 Save report</button>
+          <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 10 }}>
+            <button onClick={saveReport} disabled={saved} style={{ ...glass({ borderRadius: 8 }), padding: "6px 14px", fontSize: 12, color: saved ? "#64748b" : feature.glow, borderColor: saved ? "rgba(255,255,255,0.09)" : `${feature.glow}44`, cursor: saved ? "default" : "pointer" }}>💾 Save report</button>
+            {saved && <span style={{ color: "#34d399", fontSize: 12 }}>✓ Saved to {savedTo}</span>}
           </div>
         </>
       )}
