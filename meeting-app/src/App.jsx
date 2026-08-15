@@ -1172,13 +1172,17 @@ function WeeklyReportPage({ feature, onBack }) {
     if (!output.trim()) return;
     const now = new Date();
     const title = `${cjkDateTime(now)} ${type === "work" ? "週次報告" : "学习周报"} (${rangeLabel})`;
-    addNote("report", { id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), title, date: now.toISOString(), content: output });
+    addNote("report", { id: Date.now() + "-" + Math.random().toString(36).slice(2, 7), title, date: now.toISOString(), content: output, rtype: type });
     setTick(t => t + 1);
     setSaved(true);
   };
 
-  // saved weekly reports (own store)
-  const reports = loadNotes("report");
+  // saved weekly reports (own store), split by Work / Study
+  const [savedType, setSavedType] = useState("work");
+  const rtypeOf = (n) => n.rtype || (n.title && n.title.includes("学习") ? "study" : "work");
+  const allReports = loadNotes("report");
+  const reports = allReports.filter(n => rtypeOf(n) === savedType);
+  const reportCounts = { work: allReports.filter(n => rtypeOf(n) === "work").length, study: allReports.filter(n => rtypeOf(n) === "study").length };
   const fmtDate = (iso) => { try { return new Date(iso).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }); } catch { return ""; } };
   const delReport = (id) => { removeNote("report", id); setTick(t => t + 1); if (openId === id) setOpenId(null); };
   const dlReport = (n) => {
@@ -1190,7 +1194,7 @@ function WeeklyReportPage({ feature, onBack }) {
   return (
     <PageShell feature={feature} onBack={onBack}>
       <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
-        {[{ v: "new", l: "✏️ New report" }, { v: "saved", l: `📁 Saved (${reports.length})` }].map(t => (
+        {[{ v: "new", l: "✏️ New report" }, { v: "saved", l: `📁 Saved (${allReports.length})` }].map(t => (
           <button key={t.v} onClick={() => setTab(t.v)} style={{ ...glass({ borderRadius: 12 }), padding: "8px 18px", fontSize: 13, cursor: "pointer", background: tab === t.v ? `${feature.glow}33` : "rgba(255,255,255,0.045)", borderColor: tab === t.v ? feature.glow : "rgba(255,255,255,0.09)", color: tab === t.v ? feature.glow : "#94a3b8", fontWeight: 600 }}>{t.l}</button>
         ))}
       </div>
@@ -1228,8 +1232,14 @@ function WeeklyReportPage({ feature, onBack }) {
       )}
         </>
       ) : (
-        reports.length === 0 ? (
-          <div style={{ ...glass({ borderRadius: 14 }), padding: "40px 20px", textAlign: "center", color: "#64748b", fontSize: 13, lineHeight: 1.8 }}>No saved reports yet. Generate one in the “New report” tab and tap 💾 Save report.</div>
+        <>
+          <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+            {[{ v: "work", l: `💼 Work (${reportCounts.work})` }, { v: "study", l: `📚 Study (${reportCounts.study})` }].map(t => (
+              <button key={t.v} onClick={() => { setSavedType(t.v); setOpenId(null); }} style={{ ...glass({ borderRadius: 10 }), padding: "7px 14px", fontSize: 12, cursor: "pointer", background: savedType === t.v ? `${feature.glow}33` : "rgba(255,255,255,0.045)", borderColor: savedType === t.v ? feature.glow : "rgba(255,255,255,0.09)", color: savedType === t.v ? feature.glow : "#94a3b8" }}>{t.l}</button>
+            ))}
+          </div>
+          {reports.length === 0 ? (
+          <div style={{ ...glass({ borderRadius: 14 }), padding: "40px 20px", textAlign: "center", color: "#64748b", fontSize: 13, lineHeight: 1.8 }}>No saved {savedType === "work" ? "work" : "study"} reports yet. Generate one in the “New report” tab and tap 💾 Save report.</div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {reports.map(n => (
@@ -1255,7 +1265,8 @@ function WeeklyReportPage({ feature, onBack }) {
               </div>
             ))}
           </div>
-        )
+        )}
+        </>
       )}
     </PageShell>
   );
