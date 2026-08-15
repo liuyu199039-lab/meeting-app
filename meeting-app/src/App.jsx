@@ -118,7 +118,7 @@ const FEATURES = [
     id: "vocab",
     icon: "📊",
     title: "Weekly\nReport",
-    desc: "本周工作 / 学习周报",
+    desc: "Weekly work / study report",
     gradient: "linear-gradient(135deg, #06b6d4 0%, #67e8f9 100%)",
     glow: "#06b6d4",
     tag: "learning",
@@ -263,20 +263,20 @@ function useOpenAIRealtimeSTT({ language, onResult, onEnd, onError, onStatus }) 
     pcRef.current = pc;
     pc.oniceconnectionstatechange = () => {
       const st = pc.iceConnectionState;
-      if (st === "failed" || st === "disconnected") onErrorRef.current?.("WebRTC 连接" + st);
+      if (st === "failed" || st === "disconnected") onErrorRef.current?.("WebRTC connection " + st);
     };
     pc.addTrack(stream.getAudioTracks()[0], stream);
     const dc = pc.createDataChannel("oai-events");
     dcRef.current = dc;
     dc.onopen = () => {
-      onStatusRef.current?.("✅ 已连接 OpenAI，请开始说话…");
+      onStatusRef.current?.("✅ Connected to OpenAI — start speaking…");
       // (transcription is already configured when the ephemeral token is created,
       //  so no session.update is needed here)
       // watchdog: if no transcription after 8s, report what events we DID see
       watchdogRef.current = setTimeout(() => {
         if (!gotTextRef.current) {
-          const types = [...seenRef.current].join(", ") || "（无任何事件）";
-          onStatusRef.current?.("⚠️ 已连接但没收到识别。收到的事件类型: " + types);
+          const types = [...seenRef.current].join(", ") || "(no events)";
+          onStatusRef.current?.("⚠️ Connected but no transcription received. Event types: " + types);
         }
       }, 8000);
     };
@@ -297,7 +297,7 @@ function useOpenAIRealtimeSTT({ language, onResult, onEnd, onError, onStatus }) 
           onResultRef.current({ interim: "", accumulated: accRef.current, finalChunk: t });
         }
       } else if (m.type === "conversation.item.input_audio_transcription.failed") {
-        onErrorRef.current?.("转写失败: " + JSON.stringify(m.error || m).slice(0, 200));
+        onErrorRef.current?.("Transcription failed: " + JSON.stringify(m.error || m).slice(0, 200));
       }
     };
 
@@ -326,8 +326,8 @@ function useOpenAIRealtimeSTT({ language, onResult, onEnd, onError, onStatus }) 
 function EngineToggle({ engine, setEngine, glow, disabled }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-      <span style={{ fontSize: 11, color: "#64748b" }}>识别引擎:</span>
-      {[{ v: "free", l: "Free (Google)" }, { v: "pro", l: "⚡ Pro (OpenAI实时)" }].map(t => (
+      <span style={{ fontSize: 11, color: "#64748b" }}>Engine:</span>
+      {[{ v: "free", l: "Free (Google)" }, { v: "pro", l: "⚡ Pro (OpenAI realtime)" }].map(t => (
         <button key={t.v} onClick={() => !disabled && setEngine(t.v)} disabled={disabled} style={{ ...glass({ borderRadius: 999 }), padding: "5px 12px", fontSize: 12, cursor: disabled ? "not-allowed" : "pointer", background: engine === t.v ? `${glow}33` : "rgba(255,255,255,0.045)", borderColor: engine === t.v ? glow : "rgba(255,255,255,0.09)", color: engine === t.v ? glow : "#94a3b8", fontWeight: 600 }}>{t.l}</button>
       ))}
     </div>
@@ -416,7 +416,7 @@ const SPEAKER_COLORS = ["#6366f1", "#10b981", "#f59e0b", "#ec4899", "#06b6d4"];
 // Recognized text (src) can be edited inline; on save it is re-translated.
 function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete, onTranscript }) {
   const btn = { background: "none", border: `1px solid ${glow}44`, color: glow, borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer" };
-  const [speakers, setSpeakers] = useState(["话者 1"]); // names, max 5
+  const [speakers, setSpeakers] = useState(["Speaker 1"]); // names, max 5
   const [current, setCurrent] = useState(0); // default speaker for new segments
   const [assign, setAssign] = useState({}); // segId -> speaker index
   const [showSpk, setShowSpk] = useState(false); // speaker manager panel
@@ -432,7 +432,7 @@ function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete
     });
   }, [segments, current]);
 
-  const spName = (i) => (speakers[i] || `话者 ${i + 1}`).trim() || `话者 ${i + 1}`;
+  const spName = (i) => (speakers[i] || `Speaker ${i + 1}`).trim() || `Speaker ${i + 1}`;
   const spColor = (i) => SPEAKER_COLORS[i % SPEAKER_COLORS.length];
   const segSpk = (seg) => assign[seg.id] ?? 0;
 
@@ -457,7 +457,7 @@ function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete
   const startEdit = (seg) => { setEditId(seg.id); setEditText(seg.src); };
   const saveEdit = () => { onEditSrc?.(editId, editText); setEditId(null); setEditText(""); };
 
-  const addSpeaker = () => setSpeakers(s => s.length >= 5 ? s : [...s, `话者 ${s.length + 1}`]);
+  const addSpeaker = () => setSpeakers(s => s.length >= 5 ? s : [...s, `Speaker ${s.length + 1}`]);
   const renameSpeaker = (i, v) => setSpeakers(s => s.map((x, idx) => idx === i ? v : x));
   const removeSpeaker = (i) => {
     if (speakers.length <= 1) return;
@@ -484,11 +484,11 @@ function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete
                 {speakers.map((_, i) => <option key={i} value={i} style={{ color: "#000" }}>{spName(i)}</option>)}
               </select>
             )}
-            {live && <span style={{ fontSize: 10, color: glow }}>● 识别中</span>}
+            {live && <span style={{ fontSize: 10, color: glow }}>● transcribing</span>}
             {!live && seg && editId !== seg.id && (
               <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-                <button onClick={() => startEdit(seg)} title="修改识别文字" style={{ background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: 12 }}>✎</button>
-                {onDelete && <button onClick={() => onDelete(seg.id)} title="删除这段" style={{ background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: 12 }}>🗑</button>}
+                <button onClick={() => startEdit(seg)} title="Edit text" style={{ background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: 12 }}>✎</button>
+                {onDelete && <button onClick={() => onDelete(seg.id)} title="Delete" style={{ background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: 12 }}>🗑</button>}
               </span>
             )}
           </div>
@@ -498,14 +498,14 @@ function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete
                 onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) saveEdit(); if (e.key === "Escape") { setEditId(null); } }}
                 style={{ ...glass({ borderRadius: 8 }), width: "100%", boxSizing: "border-box", padding: 8, color: "#f1f5f9", fontSize: 15, lineHeight: 1.6, outline: "none", resize: "vertical", fontFamily: "system-ui" }} />
               <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-                <button onClick={saveEdit} style={{ ...btn, background: `${glow}22` }}>✓ 保存并重译</button>
-                <button onClick={() => { setEditId(null); setEditText(""); }} style={{ ...btn, color: "#94a3b8", borderColor: "rgba(255,255,255,0.15)" }}>取消</button>
+                <button onClick={saveEdit} style={{ ...btn, background: `${glow}22` }}>✓ Save & re-translate</button>
+                <button onClick={() => { setEditId(null); setEditText(""); }} style={{ ...btn, color: "#94a3b8", borderColor: "rgba(255,255,255,0.15)" }}>Cancel</button>
               </div>
             </div>
           ) : (
             <div style={{ fontSize: 15, color: live ? "#94a3b8" : "#f1f5f9", lineHeight: 1.6 }}>{src}{live && <span style={{ color: "#475569" }}>…</span>}</div>
           )}
-          {!live && editId !== (seg && seg.id) && <div style={{ fontSize: 14, color: pending ? "#64748b" : "#a5b4fc", lineHeight: 1.6, marginTop: 4 }}>{pending ? "翻译中…" : tr}</div>}
+          {!live && editId !== (seg && seg.id) && <div style={{ fontSize: 14, color: pending ? "#64748b" : "#a5b4fc", lineHeight: 1.6, marginTop: 4 }}>{pending ? "translating…" : tr}</div>}
         </div>
       </div>
     );
@@ -516,7 +516,7 @@ function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", background: `${glow}18`, borderBottom: `1px solid ${glow}22`, flexWrap: "wrap", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 12, color: glow, fontWeight: 700 }}>{label}</span>
-          <button onClick={() => setShowSpk(v => !v)} style={{ ...btn, borderColor: "rgba(255,255,255,0.15)", color: "#94a3b8" }}>👥 话者 ({speakers.length}) {showSpk ? "▲" : "▼"}</button>
+          <button onClick={() => setShowSpk(v => !v)} style={{ ...btn, borderColor: "rgba(255,255,255,0.15)", color: "#94a3b8" }}>👥 Speakers ({speakers.length}) {showSpk ? "▲" : "▼"}</button>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           {transcript && <button onClick={download} style={btn}>↓ Download</button>}
@@ -527,17 +527,17 @@ function LiveFeed({ segments, interim, glow, label, onClear, onEditSrc, onDelete
 
       {showSpk && (
         <div style={{ padding: "12px 14px", borderBottom: "1px solid rgba(255,255,255,0.08)", display: "flex", flexDirection: "column", gap: 8 }}>
-          <div style={{ fontSize: 11, color: "#64748b" }}>最多 5 个话者。点「当前」决定新段落默认归谁；每段也可在左侧下拉单独改。</div>
+          <div style={{ fontSize: 11, color: "#64748b" }}>Up to 5 speakers. "Current" sets the default for new lines; each line can also be reassigned via its dropdown.</div>
           {speakers.map((n, i) => (
             <div key={i} style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span style={{ width: 12, height: 12, borderRadius: "50%", background: spColor(i), flexShrink: 0 }} />
-              <input value={n} onChange={e => renameSpeaker(i, e.target.value)} placeholder={`话者 ${i + 1}`}
+              <input value={n} onChange={e => renameSpeaker(i, e.target.value)} placeholder={`Speaker ${i + 1}`}
                 style={{ ...glass({ borderRadius: 6 }), flex: 1, minWidth: 0, padding: "4px 8px", color: "#f1f5f9", fontSize: 13, outline: "none" }} />
-              <button onClick={() => setCurrent(i)} style={{ ...btn, fontSize: 11, background: current === i ? `${glow}33` : "none", borderColor: current === i ? glow : "rgba(255,255,255,0.15)", color: current === i ? glow : "#94a3b8" }}>{current === i ? "✓ 当前" : "设为当前"}</button>
+              <button onClick={() => setCurrent(i)} style={{ ...btn, fontSize: 11, background: current === i ? `${glow}33` : "none", borderColor: current === i ? glow : "rgba(255,255,255,0.15)", color: current === i ? glow : "#94a3b8" }}>{current === i ? "✓ Current" : "Set current"}</button>
               {speakers.length > 1 && <button onClick={() => removeSpeaker(i)} style={{ background: "none", border: "none", color: "#fb7185", cursor: "pointer", fontSize: 13 }}>✕</button>}
             </div>
           ))}
-          {speakers.length < 5 && <button onClick={addSpeaker} style={{ ...btn, alignSelf: "flex-start" }}>+ 添加话者</button>}
+          {speakers.length < 5 && <button onClick={addSpeaker} style={{ ...btn, alignSelf: "flex-start" }}>+ Add speaker</button>}
         </div>
       )}
 
@@ -595,13 +595,13 @@ function SummarizeBlock({ text, transcript, glow, gradient, kind }) {
   return (
     <div style={{ marginTop: 16 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 11, color: "#64748b" }}>记录语言:</span>
+        <span style={{ fontSize: 11, color: "#64748b" }}>Language:</span>
         {LANGS.map(t => (
           <button key={t.v} onClick={() => setLang(t.v)} style={{ ...glass({ borderRadius: 999 }), padding: "4px 12px", fontSize: 12, cursor: "pointer", background: lang === t.v ? `${glow}33` : "rgba(255,255,255,0.045)", borderColor: lang === t.v ? glow : "rgba(255,255,255,0.09)", color: lang === t.v ? glow : "#94a3b8", fontWeight: 600 }}>{t.l}</button>
         ))}
       </div>
       <ActionBtn onClick={summarize} loading={loading} disabled={false} gradient={gradient}>{btnLabel}</ActionBtn>
-      {saved && <div style={{ marginTop: 10, color: "#34d399", fontSize: 12 }}>✓ 已保存到 {savedTo}</div>}
+      {saved && <div style={{ marginTop: 10, color: "#34d399", fontSize: 12 }}>✓ Saved to {savedTo}</div>}
       {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
       {notes && <ResultBox content={notes} label={resultLabel} accent={glow} onDownload={download} />}
     </div>
@@ -654,7 +654,7 @@ function NotesLibrary({ feature, kind }) {
   };
 
   const downloadNote = (n) => {
-    const body = `${n.title}\n${fmtDate(n.date)}\n\n${n.content}` + (n.transcript ? `\n\n──── 原文记录 ────\n${n.transcript}` : "");
+    const body = `${n.title}\n${fmtDate(n.date)}\n\n${n.content}` + (n.transcript ? `\n\n──── Original transcript ────\n${n.transcript}` : "");
     const blob = new Blob([body], { type: "text/plain;charset=utf-8" });
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
     a.download = `${n.title}.txt`; a.click();
@@ -680,15 +680,15 @@ function NotesLibrary({ feature, kind }) {
         merged.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
         saveNotesList(kind, merged);
         setNotes(loadNotes(kind));
-        alert(`已导入，当前共 ${merged.length} 条`);
-      } catch { alert("导入失败：文件格式不对"); }
+        alert(`Imported. ${merged.length} items total.`);
+      } catch { alert("Import failed: invalid file format."); }
     };
     reader.readAsText(file);
   };
 
   const emptyHint = isMeeting
-    ? "还没有会议记录。在 Live Translate 里翻译会议后点「📝 Summarize meeting minutes」，会自动保存到这里。"
-    : "还没有笔记。在 Video / Live Translate 里翻译后点「📝 Summarize into notes」，会自动保存到这里。";
+    ? "No meeting minutes yet. In Live Translate, translate a meeting then tap \u300c📝 Summarize meeting minutes\u300d and it will be saved here."
+    : "No notes yet. In Video / Live Translate, translate then tap \u300c📝 Summarize into notes\u300d and it will be saved here.";
   const toolBtn = { ...glass({ borderRadius: 8 }), padding: "5px 10px", fontSize: 11, color: "#94a3b8", cursor: "pointer" };
 
   return (
@@ -734,8 +734,8 @@ function NotesLibrary({ feature, kind }) {
                         <textarea value={editContent} onChange={e => setEditContent(e.target.value)} rows={12}
                           style={{ ...glass({ borderRadius: 10 }), width: "100%", boxSizing: "border-box", padding: 12, color: "#e2e8f0", fontSize: 14, lineHeight: 1.8, outline: "none", resize: "vertical", fontFamily: "system-ui" }} />
                         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                          <button onClick={saveEdit} style={{ background: feature.gradient, border: "none", color: "#fff", borderRadius: 8, padding: "6px 16px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>✓ 保存</button>
-                          <button onClick={() => setEditId(null)} style={{ background: "none", border: "1px solid rgba(255,255,255,0.15)", color: "#94a3b8", borderRadius: 8, padding: "6px 16px", fontSize: 12, cursor: "pointer" }}>取消</button>
+                          <button onClick={saveEdit} style={{ background: feature.gradient, border: "none", color: "#fff", borderRadius: 8, padding: "6px 16px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>✓ Save</button>
+                          <button onClick={() => setEditId(null)} style={{ background: "none", border: "1px solid rgba(255,255,255,0.15)", color: "#94a3b8", borderRadius: 8, padding: "6px 16px", fontSize: 12, cursor: "pointer" }}>Cancel</button>
                         </div>
                       </div>
                     ) : (
@@ -743,12 +743,12 @@ function NotesLibrary({ feature, kind }) {
                         <pre style={{ margin: 0, padding: 16, color: "#cbd5e1", fontSize: 14, lineHeight: 1.8, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "system-ui" }}>{n.content}</pre>
                         {n.transcript && (
                           <div style={{ padding: "0 16px 8px" }}>
-                            <button onClick={() => setShowTrans(v => !v)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>📄 原文记录 {showTrans ? "▲" : "▼"}</button>
+                            <button onClick={() => setShowTrans(v => !v)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>📄 Transcript {showTrans ? "▲" : "▼"}</button>
                             {showTrans && <pre style={{ margin: "10px 0 0", padding: 12, background: "rgba(255,255,255,0.03)", borderRadius: 8, color: "#94a3b8", fontSize: 13, lineHeight: 1.7, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "system-ui", maxHeight: 280, overflowY: "auto" }}>{n.transcript}</pre>}
                           </div>
                         )}
                         <div style={{ display: "flex", gap: 8, padding: "8px 16px 14px" }}>
-                          <button onClick={() => startEdit(n)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>✎ 编辑</button>
+                          <button onClick={() => startEdit(n)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>✎ Edit</button>
                           <button onClick={() => navigator.clipboard.writeText(n.content)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>Copy</button>
                           <button onClick={() => downloadNote(n)} style={{ background: "none", border: `1px solid ${feature.glow}44`, color: feature.glow, borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>↓ Download</button>
                           <button onClick={() => del(n.id)} style={{ background: "none", border: "1px solid #fb718544", color: "#fb7185", borderRadius: 6, padding: "4px 12px", fontSize: 11, cursor: "pointer" }}>Delete</button>
@@ -763,16 +763,16 @@ function NotesLibrary({ feature, kind }) {
         )
       ) : (
         <>
-          <TextInput value={input} onChange={setInput} label={isMeeting ? "粘贴会议内容（日文/中文）" : "粘贴学习内容（字幕、教材、课堂记录…）"} placeholder={isMeeting ? "Paste meeting content..." : "Paste study content..."} accent={feature.glow} rows={7} />
+          <TextInput value={input} onChange={setInput} label={isMeeting ? "Paste meeting content (JP/CN)" : "Paste study content (subtitles, textbook, class notes…)"} placeholder={isMeeting ? "Paste meeting content..." : "Paste study content..."} accent={feature.glow} rows={7} />
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-            <span style={{ fontSize: 11, color: "#64748b" }}>记录语言:</span>
+            <span style={{ fontSize: 11, color: "#64748b" }}>Language:</span>
             {LANGS.map(t => (
               <button key={t.v} onClick={() => setLang(t.v)} style={{ ...glass({ borderRadius: 999 }), padding: "4px 12px", fontSize: 12, cursor: "pointer", background: lang === t.v ? `${feature.glow}33` : "rgba(255,255,255,0.045)", borderColor: lang === t.v ? feature.glow : "rgba(255,255,255,0.09)", color: lang === t.v ? feature.glow : "#94a3b8", fontWeight: 600 }}>{t.l}</button>
             ))}
           </div>
           <ActionBtn onClick={run} loading={processing} disabled={!input.trim()} gradient={feature.gradient}>{isMeeting ? "📋 Generate & save" : "📚 Generate & save"}</ActionBtn>
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
-          {output && <ResultBox content={output} label={`${isMeeting ? "📋 Meeting Minutes" : "📚 Study Notes"}（已保存）`} accent={feature.glow} />}
+          {output && <ResultBox content={output} label={`${isMeeting ? "📋 Meeting Minutes" : "📚 Study Notes"} (saved)`} accent={feature.glow} />}
         </>
       )}
     </>
@@ -938,7 +938,7 @@ function TranslatePage({ feature, onBack }) {
     setInterim(""); setError(""); setStatus("");
     if (engine === "pro") {
       try { await rt.start(); return; }
-      catch (e) { setEngine("free"); setError("Pro(OpenAI)启动失败：" + e.message + "，已切到 Free。"); try { sr.start(); } catch {} return; }
+      catch (e) { setEngine("free"); setError("Pro (OpenAI) failed to start: " + e.message + " — switched to Free."); try { sr.start(); } catch {} return; }
     }
     try { sr.start(); } catch {}
   };
@@ -962,14 +962,14 @@ function TranslatePage({ feature, onBack }) {
             <MicButton listening={listening} onStart={startLive} onStop={stop} glow={feature.glow} disabled={!supported} />
             <Waveform active={listening} glow={feature.glow} />
             <div style={{ fontSize: 13, color: listening ? feature.glow : "#64748b", fontWeight: 600, textAlign: "center" }}>
-              {!supported ? "⚠️ 请使用 Chrome 浏览器"
-                : listening ? "🔴 实时翻译中... 边说边译，点击停止"
-                : "点一次即可 — 边说边译，无需一直按住"}
+              {!supported ? "⚠️ Please use Chrome"
+                : listening ? "🔴 Live translating… keep talking, tap to stop"
+                : "Tap once — it translates as you speak, no need to hold"}
             </div>
           </div>
 
           {engine === "pro" && listening && status && <div style={{ marginTop: 4, marginBottom: 8, color: "#94a3b8", fontSize: 12, textAlign: "center" }}>{status}</div>}
-          <LiveFeed segments={segments} interim={(pendingText + interim).trim()} glow={feature.glow} label={`实时翻译 → ${targetLabel}`} onClear={!listening ? reset : undefined} onEditSrc={editSegment} onDelete={deleteSegment} onTranscript={setLiveTranscript} />
+          <LiveFeed segments={segments} interim={(pendingText + interim).trim()} glow={feature.glow} label={`Live translation → ${targetLabel}`} onClear={!listening ? reset : undefined} onEditSrc={editSegment} onDelete={deleteSegment} onTranscript={setLiveTranscript} />
           {!listening && <SummarizeBlock text={fullText} transcript={liveTranscript} glow={feature.glow} gradient={feature.gradient} kind="meeting" />}
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
         </>
@@ -1020,7 +1020,7 @@ function VideoTranslatePage({ feature, onBack }) {
     setInterim(""); setError(""); setStatus("");
     if (engine === "pro") {
       try { await rt.start(); return; }
-      catch (e) { setEngine("free"); setError("Pro(OpenAI)启动失败：" + e.message + "，已切到 Free。"); try { sr.start(); } catch {} return; }
+      catch (e) { setEngine("free"); setError("Pro (OpenAI) failed to start: " + e.message + " — switched to Free."); try { sr.start(); } catch {} return; }
     }
     try { sr.start(); } catch {}
   };
@@ -1059,7 +1059,7 @@ function VideoTranslatePage({ feature, onBack }) {
         <>
           {/* output format toggle (transcript mode only) */}
           <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-            {[{ v: "bilingual", l: "EN + 中文" }, { v: "zh", l: "仅中文" }].map(m => (
+            {[{ v: "bilingual", l: "EN + CN" }, { v: "zh", l: "CN only" }].map(m => (
               <button key={m.v} onClick={() => setMode(m.v)} style={{ ...glass({ borderRadius: 10 }), padding: "6px 14px", fontSize: 12, cursor: "pointer", background: mode === m.v ? `${feature.glow}33` : "rgba(255,255,255,0.045)", borderColor: mode === m.v ? feature.glow : "rgba(255,255,255,0.09)", color: mode === m.v ? feature.glow : "#94a3b8" }}>{m.l}</button>
             ))}
           </div>
@@ -1079,16 +1079,16 @@ function VideoTranslatePage({ feature, onBack }) {
             <MicButton listening={listening} onStart={startLive} onStop={stop} glow={feature.glow} disabled={!supported} />
             <Waveform active={listening} glow={feature.glow} />
             <div style={{ fontSize: 13, color: listening ? feature.glow : "#64748b", fontWeight: 600, textAlign: "center" }}>
-              {!supported ? "⚠️ 请使用 Chrome 浏览器"
-                : listening ? "🔴 实时翻译中... 播放视频，点击停止"
-                : "点一次即可 — 边播边转写翻译"}
+              {!supported ? "⚠️ Please use Chrome"
+                : listening ? "🔴 Live translating… play the video, tap to stop"
+                : "Tap once — transcribes & translates as it plays"}
             </div>
           </div>
           <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>
-            💡 用于没有字幕的视频。桌面 Chrome 效果最佳；把声音外放对着麦克风。
+            💡 For videos without subtitles. Best on desktop Chrome; play audio aloud near the mic.
           </div>
           {engine === "pro" && listening && status && <div style={{ marginBottom: 8, color: "#94a3b8", fontSize: 12, textAlign: "center" }}>{status}</div>}
-          <LiveFeed segments={segments} interim={(pendingText + interim).trim()} glow={feature.glow} label="🌏 实时翻译 → 中文" onClear={!listening ? reset : undefined} onEditSrc={editSegment} onDelete={deleteSegment} onTranscript={setLiveTranscript} />
+          <LiveFeed segments={segments} interim={(pendingText + interim).trim()} glow={feature.glow} label="🌏 Live translation → CN" onClear={!listening ? reset : undefined} onEditSrc={editSegment} onDelete={deleteSegment} onTranscript={setLiveTranscript} />
           {!listening && <SummarizeBlock text={fullText} transcript={liveTranscript} glow={feature.glow} gradient={feature.gradient} kind="study" />}
           {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
         </>
@@ -1141,11 +1141,11 @@ function WeeklyReportPage({ feature, onBack }) {
 
   const kind = type === "work" ? "meeting" : "study";
   const available = counts[kind];
-  const weekLabel = `${ws.getMonth() + 1}月${ws.getDate()}日〜今天`;
+  const weekLabel = `${ws.getMonth() + 1}/${ws.getDate()} – today`;
 
   const generate = async () => {
     const notes = inWeek(kind);
-    if (!notes.length) { setError(type === "work" ? "本周还没有会议记录。" : "本周还没有学习笔记。"); return; }
+    if (!notes.length) { setError(type === "work" ? "No meeting minutes this week." : "No study notes this week."); return; }
     const text = notes.slice().reverse().map(n => `【${n.title}】\n${n.content}`).join("\n\n---\n\n");
     setError(""); setProcessing(true);
     try {
@@ -1154,7 +1154,7 @@ function WeeklyReportPage({ feature, onBack }) {
         : `你是学习总结助手。以下是本周的学习笔记。请生成一份【本周学习周报】（中文）：\n■ 本周学习概览（2-3句）\n■ 核心要点（按主题分类、分条列出，合并重复）\n■ 难点/易错点（★标注）\n■ 下周建议 / 待巩固\n精炼、条理清晰，不要照抄原文。`;
       const result = await callClaude(text, sys);
       setOutput(result);
-    } catch (e) { setError("生成失败: " + e.message); }
+    } catch (e) { setError("Generation failed: " + e.message); }
     setProcessing(false);
   };
 
@@ -1174,28 +1174,28 @@ function WeeklyReportPage({ feature, onBack }) {
   return (
     <PageShell feature={feature} onBack={onBack}>
       <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 14, lineHeight: 1.6 }}>
-        自动汇总<strong style={{ color: "#e2e8f0" }}>本周</strong>的记录，生成一份周报。<span style={{ color: "#64748b" }}>（本周：{weekLabel}）</span>
+        Auto-summarize <strong style={{ color: "#e2e8f0" }}>this week</strong>'s records into a weekly report. <span style={{ color: "#64748b" }}>(This week: {weekLabel})</span>
       </div>
 
-      <div style={{ fontSize: 12, color: "#64748b", marginBottom: 8 }}>周报类型</div>
+      <div style={{ fontSize: 12, color: "#64748b", marginBottom: 8 }}>Report type</div>
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        {[{ v: "work", l: `💼 工作周报（会议记录 ${counts.meeting}）` }, { v: "study", l: `📚 学习周报（学习笔记 ${counts.study}）` }].map(t => (
+        {[{ v: "work", l: `💼 Work report (meetings ${counts.meeting})` }, { v: "study", l: `📚 Study report (notes ${counts.study})` }].map(t => (
           <button key={t.v} onClick={() => { setType(t.v); setOutput(""); setError(""); }} style={{ ...glass({ borderRadius: 10 }), padding: "7px 14px", fontSize: 12, cursor: "pointer", background: type === t.v ? `${feature.glow}33` : "rgba(255,255,255,0.045)", borderColor: type === t.v ? feature.glow : "rgba(255,255,255,0.09)", color: type === t.v ? feature.glow : "#94a3b8" }}>{t.l}</button>
         ))}
       </div>
       <div style={{ fontSize: 11, color: "#64748b", marginBottom: 14 }}>
-        {type === "work" ? "从本周会议记录生成可提交给客户的日语周报（日本語）。" : "从本周学习笔记生成学习总结和要点（中文）。"}
+        {type === "work" ? "Generates a client-ready weekly report in Japanese from this week\u2019s meeting minutes." : "Generates a study summary & key points in Chinese from this week\u2019s notes."}
       </div>
 
-      <ActionBtn onClick={generate} loading={processing} disabled={!available} gradient={feature.gradient}>📊 生成周报</ActionBtn>
-      {!available && <div style={{ marginTop: 12, color: "#64748b", fontSize: 12 }}>本周还没有{type === "work" ? "会议记录" : "学习笔记"}。先去记录一些，再回来生成周报。</div>}
+      <ActionBtn onClick={generate} loading={processing} disabled={!available} gradient={feature.gradient}>📊 Generate report</ActionBtn>
+      {!available && <div style={{ marginTop: 12, color: "#64748b", fontSize: 12 }}>Nothing this week yet ({type === "work" ? "meeting minutes" : "study notes"}). Record some first, then come back.</div>}
       {error && <div style={{ marginTop: 12, color: "#fb7185", fontSize: 13 }}>{error}</div>}
-      {processing && <div style={{ textAlign: "center", padding: 20, color: feature.glow, fontSize: 13 }}>⏳ 正在生成周报…</div>}
+      {processing && <div style={{ textAlign: "center", padding: 20, color: feature.glow, fontSize: 13 }}>⏳ Generating report…</div>}
       {output && !processing && (
         <>
-          <ResultBox content={output} label={type === "work" ? "📊 週次報告" : "📊 学习周报"} accent={feature.glow} onDownload={download} />
+          <ResultBox content={output} label={type === "work" ? "📊 Weekly Report (JA)" : "📊 Weekly Report"} accent={feature.glow} onDownload={download} />
           <div style={{ marginTop: 10 }}>
-            <button onClick={saveReport} style={{ ...glass({ borderRadius: 8 }), padding: "6px 14px", fontSize: 12, color: feature.glow, borderColor: `${feature.glow}44`, cursor: "pointer" }}>💾 保存周报</button>
+            <button onClick={saveReport} style={{ ...glass({ borderRadius: 8 }), padding: "6px 14px", fontSize: 12, color: feature.glow, borderColor: `${feature.glow}44`, cursor: "pointer" }}>💾 Save report</button>
           </div>
         </>
       )}
